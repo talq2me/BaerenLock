@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <!-- Device owner policies -->
+        <disable-camera />
+        <disable-keyguard />
+        <disable-status-bar />
+        <watch-login />
+        <reset-password />
+        <force-lock />
+        <wipe-data />
+        <expire-password />
+        <encrypted-storage />
+        <disable-account-management />
+        <disable-google-apps />
+        <disable-keyguard-features />
+        <disable-screen-capture />
+        <disable-tts-text-to-speech />
+        <disable-voice-dialer />
+
+        <!-- App management -->
+        <install-apps />
+        <uninstall-apps />
+        <enable-system-apps />
+        <disable-apps />
+
+        <!-- Network and connectivity -->
+        <set-global-proxy />
+        <set-recommended-global-proxy />
+        <set-preferred-activity />
+        <set-application-restrictions />
+        <add-cross-profile-apps />
+
+        <!-- Security policies -->
+        <set-password-quality />
+        <set-password-minimum-length />
+        <set-password-minimum-letters />
+        <set-password-minimum-numeric />
+        <set-password-minimum-symbols />
+        <set-password-minimum-non-letter />
+        <set-password-history-length />
+        <set-password-expiration-timeout />
+        <require-strong-auth />
+
+        <!-- Hardware restrictions -->
+        <disable-bluetooth-contact-sharing />
+        <disable-printing />
+        <disable-data-roaming />
+        <disable-network-reset />
+        <disable-metered-data />
+        <disable-microphone />
+        <disable-location />
+        <disable-nfc />
+        <disable-usb-file-transfer />
+        <disable-usb-charging />
+        <disable-wifi />
+        <disable-wifi-tethering />
+        <disable-safe-boot />
+        <disable-backup />
+        <disable-factory-reset />
+        <disable-developer-options />
+        <disable-install-unknown-sources />
+        <disable-verify-apps />
+        <disable-clipboard />
+        <disable-autofill />
+        <disable-bluetooth />
+        <disable-configure-bluetooth />
+        <disable-configure-cell-broadcasts />
+        <disable-configure-mobile-networks />
+        <disable-configure-tethering />
+        <disable-configure-vpn />
+        <disable-configure-wifi />
+        <disable-create-windows />
+        <disable-cross-profile-copy-paste />
+        <disable-mount-physical-media />
+        <disable-outgoing-calls />
+        <disable-pairing />
+        <disable-personal-apps />
+        <disable-play-store />
+        <disable-recent-apps />
+        <disable-sms />
+        <disable-unmute-microphone />
+        <disable-voice-assistants />
+        <disable-wallet />
+    </uses-policies>
+</device-admin>
+

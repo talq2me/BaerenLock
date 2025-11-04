@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Baeren</string>
+    <string name="accessibility_description">App blocker to restrict apps outside reward time.</string>
+    <string name="device_admin_description">Device Owner for BaerenEd parental controls. Provides comprehensive device management for child safety.</string>
+</resources>

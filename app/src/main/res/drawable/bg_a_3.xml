@@ -1,0 +1,21 @@
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Gradient background -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="270"
+                android:endColor="#FFFFD54F"
+                android:startColor="#FFFFC107"
+                android:type="linear" />
+            <!-- Light Amber -->
+            <!-- Amber -->
+        </shape>
+    </item>
+    <!-- Optional: Add a subtle pattern or texture if desired -->
+    <item>
+        <bitmap
+            android:alpha="0.1"
+            android:src="@android:drawable/btn_default"
+            android:tileMode="repeat" />
+    </item>
+</layer-list>
