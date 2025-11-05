@@ -5,7 +5,6 @@ import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
 import android.util.Log
 import android.os.Handler
-import android.os.Looper
 import android.app.ActivityManager
 import android.app.usage.UsageStatsManager
 import android.content.Context
@@ -15,36 +14,53 @@ import android.os.Build
 import com.talq2me.baerenlock.RewardManager
 import com.talq2me.baerenlock.DevicePolicyManager
 import com.talq2me.baerenlock.LauncherActivity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.graphics.Color
+import android.os.HandlerThread
 
 class AppBlockerService : AccessibilityService() {
 
     private var lastPackage: String? = null
-    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var backgroundThread: HandlerThread
+    private lateinit var backgroundHandler: Handler
     private val periodicCheck = object : Runnable {
         override fun run() {
             checkForegroundApp()
-            handler.postDelayed(this, 2000) // Check every 2 seconds
+            backgroundHandler.postDelayed(this, 2000) // Check every 2 seconds
         }
     }
 
-    private val usageHandler = Handler(Looper.getMainLooper())
     private val usageCheck = object : Runnable {
         override fun run() {
             checkUsageStats()
-            usageHandler.postDelayed(this, 2000)
+            backgroundHandler.postDelayed(this, 2000)
         }
     }
 
-    private val backgroundCleanupHandler = Handler(Looper.getMainLooper())
     private val backgroundCleanupCheck = object : Runnable {
         override fun run() {
             cleanupUnauthorizedBackgroundApps()
-            backgroundCleanupHandler.postDelayed(this, 30000) // Check every 30 seconds
+            backgroundHandler.postDelayed(this, 30000) // Check every 30 seconds
         }
     }
 
     private lateinit var devicePolicyManager: com.talq2me.baerenlock.DevicePolicyManager
     private var blockedPackages = mutableSetOf<String>()
+
+    private val CHANNEL_ID = "AppBlockerServiceChannel"
+    private val NOTIFICATION_ID = 1
+
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+
+        backgroundThread = HandlerThread("AppBlockerBackground").apply {
+            start()
+        }
+        backgroundHandler = Handler(backgroundThread.looper)
+    }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         // Log all events for debugging
@@ -84,24 +100,27 @@ class AppBlockerService : AccessibilityService() {
         super.onServiceConnected()
         Log.d("AppBlocker", "Accessibility service connected and ready to block apps")
 
+        // Start foreground service
+        startForeground(NOTIFICATION_ID, getNotification())
+
         // Initialize Device Policy Manager
         devicePolicyManager = com.talq2me.baerenlock.DevicePolicyManager.getInstance(this)
 
         // Load blocked packages from settings
         loadBlockedPackages()
 
-        handler.post(periodicCheck)
+        backgroundHandler.post(periodicCheck)
         // Start UsageStats polling
         if (!hasUsageStatsPermission()) {
             Log.d("AppBlocker", "USAGESTATS: UsageStats permission NOT granted. Prompting user.")
             promptForUsageAccess()
         } else {
             Log.d("AppBlocker", "USAGESTATS: UsageStats permission granted. Starting usage check.")
-            usageHandler.post(usageCheck)
+            backgroundHandler.post(usageCheck)
         }
 
         // Start background app cleanup
-        backgroundCleanupHandler.post(backgroundCleanupCheck)
+        backgroundHandler.post(backgroundCleanupCheck)
 
         // Ensure RewardManager's timer is started if there are reward minutes
         // Removed as timer management is now centralized in LauncherActivity.onResume()
@@ -115,9 +134,11 @@ class AppBlockerService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
-        handler.removeCallbacks(periodicCheck)
-        usageHandler.removeCallbacks(usageCheck)
-        backgroundCleanupHandler.removeCallbacks(backgroundCleanupCheck)
+        backgroundHandler.removeCallbacks(periodicCheck)
+        backgroundHandler.removeCallbacks(usageCheck)
+        backgroundHandler.removeCallbacks(backgroundCleanupCheck)
+        backgroundThread.quitSafely()
+        stopForeground(true)
     }
 
     private fun checkForegroundApp() {
@@ -309,6 +330,29 @@ class AppBlockerService : AccessibilityService() {
 
     fun getBlockedPackages(): Set<String> {
         return blockedPackages.toSet()
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val serviceChannel = NotificationChannel(
+                CHANNEL_ID,
+                "App Blocker Service Channel",
+                NotificationManager.IMPORTANCE_HIGH
+            )
+            serviceChannel.lightColor = Color.BLUE
+            serviceChannel.lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(serviceChannel)
+        }
+    }
+
+    private fun getNotification(): Notification {
+        return Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("App Blocker Running")
+            .setContentText("Monitoring apps to ensure child safety.")
+            .setSmallIcon(R.mipmap.ic_launcher) // Use your app's launcher icon
+            .setOngoing(true)
+            .build()
     }
 
     fun clearAllBlockedPackages() {
