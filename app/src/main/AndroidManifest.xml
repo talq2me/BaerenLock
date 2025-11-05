@@ -45,16 +45,13 @@
             android:excludeFromRecents="true"
             android:lockTaskMode="if_whitelisted">
 
-            <!-- This is what makes it the default launcher -->
+            <!-- This is what makes it the default launcher and what Android Studio needs to install/debug -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
-
-            <!-- This is what Android Studio needs to install/debug -->
-            <!-- Removed LAUNCHER category to hide from app drawer -->
 
         </activity>
         <activity

@@ -24,6 +24,7 @@ class RewardAppsSettingsActivity : AppCompatActivity() {
             override fun handleOnBackPressed() {
                 val prefs = getSharedPreferences("settings", MODE_PRIVATE)
                 prefs.edit().putStringSet("reward_apps", selectedPackages).apply()
+                RewardManager.refreshRewardEligibleApps(this@RewardAppsSettingsActivity) // Refresh RewardManager
                 Toast.makeText(this@RewardAppsSettingsActivity, "Reward apps saved", Toast.LENGTH_SHORT).show()
                 finish()
             }

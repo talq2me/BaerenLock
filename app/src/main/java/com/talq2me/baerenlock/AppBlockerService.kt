@@ -59,30 +59,9 @@ class AppBlockerService : AccessibilityService() {
 
         val pkgName = event.packageName?.toString() ?: return
 
-        // Ignore launcher, system UI, and our own app
-        if (pkgName == "com.android.systemui" || 
-            pkgName == "com.android.launcher" ||
-            pkgName == "com.android.launcher3" ||
-            pkgName == "com.google.android.apps.nexuslauncher" ||
-            pkgName == packageName) {
-            lastPackage = pkgName
-            Log.d("AppBlocker", "Ignoring system app: $pkgName")
-            return
-        }
-
-        // Don't process the same package multiple times in a row
-        if (pkgName == lastPackage) {
-            Log.d("AppBlocker", "Same package as last time: $pkgName")
-            return
-        }
-
-        // Log for debugging
-        Log.d("AppBlocker", "App switched to: $pkgName, allowed: ${RewardManager.isAllowed(pkgName)}")
-        Log.d("AppBlocker", "Current allowed apps: ${RewardManager.allowedApps}")
-
-        // 🚫 Block any app that's not allowed
-        if (!RewardManager.isAllowed(pkgName) || blockedPackages.contains(pkgName)) {
-            Log.d("AppBlocker", "🚫 BLOCKING access to: $pkgName - returning to launcher")
+        // Only block if it's a reward-eligible app and reward minutes are 0
+        if (RewardManager.rewardEligibleApps.contains(pkgName) && RewardManager.currentRewardMinutes <= 0) {
+            Log.d("AppBlocker", "🚫 BLOCKING expired reward app: $pkgName - returning to launcher")
             lastPackage = pkgName
 
             // Use device owner capabilities if available for stronger blocking
@@ -95,7 +74,8 @@ class AppBlockerService : AccessibilityService() {
             return
         }
 
-        lastPackage = pkgName
+        // For all other apps (system, non-reward, or reward with time remaining), do nothing.
+        return
     }
 
     override fun onInterrupt() {}
@@ -113,13 +93,24 @@ class AppBlockerService : AccessibilityService() {
         handler.post(periodicCheck)
         // Start UsageStats polling
         if (!hasUsageStatsPermission()) {
+            Log.d("AppBlocker", "USAGESTATS: UsageStats permission NOT granted. Prompting user.")
             promptForUsageAccess()
         } else {
+            Log.d("AppBlocker", "USAGESTATS: UsageStats permission granted. Starting usage check.")
             usageHandler.post(usageCheck)
         }
 
         // Start background app cleanup
         backgroundCleanupHandler.post(backgroundCleanupCheck)
+
+        // Ensure RewardManager's timer is started if there are reward minutes
+        // Removed as timer management is now centralized in LauncherActivity.onResume()
+        // if (RewardManager.currentRewardMinutes > 0) {
+        //     Log.d("AppBlocker", "onServiceConnected: Reward minutes present (${RewardManager.currentRewardMinutes} min). Starting RewardManager timer.")
+        //     RewardManager.startRewardTimer(this)
+        // } else {
+        //     Log.d("AppBlocker", "onServiceConnected: No reward minutes present. Not starting RewardManager timer.")
+        // }
     }
 
     override fun onDestroy() {
@@ -141,22 +132,10 @@ class AppBlockerService : AccessibilityService() {
                     if (process.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
                         val pkgName = process.processName
                         Log.d("AppBlocker", "Foreground process: $pkgName")
-                        
-                        // Ignore launcher, system UI, and our own app
-                        if (pkgName == "com.android.systemui" || 
-                            pkgName == "com.android.launcher" ||
-                            pkgName == "com.android.launcher3" ||
-                            pkgName == "com.google.android.apps.nexuslauncher" ||
-                            pkgName == packageName) {
-                            Log.d("AppBlocker", "Ignoring system app: $pkgName")
-                            continue
-                        }
 
-                        Log.d("AppBlocker", "Periodic check - Foreground app: $pkgName, allowed: ${RewardManager.isAllowed(pkgName)}")
-
-                        // 🚫 Block any app that's not allowed
-                        if (!RewardManager.isAllowed(pkgName) || blockedPackages.contains(pkgName)) {
-                            Log.d("AppBlocker", "🚫 PERIODIC CHECK - BLOCKING access to: $pkgName - returning to launcher")
+                        // Only block if it's a reward-eligible app and reward minutes are 0
+                        if (RewardManager.rewardEligibleApps.contains(pkgName) && RewardManager.currentRewardMinutes <= 0) {
+                            Log.d("AppBlocker", "🚫 PERIODIC CHECK - BLOCKING expired reward app: $pkgName - returning to launcher")
 
                             // Use device owner capabilities if available for stronger blocking
                             if (devicePolicyManager.isDeviceOwnerActive()) {
@@ -167,6 +146,8 @@ class AppBlockerService : AccessibilityService() {
                             returnToLauncher()
                             return
                         }
+                        // For all other apps, do nothing
+                        return
                     }
                 }
             } else {
@@ -217,27 +198,27 @@ class AppBlockerService : AccessibilityService() {
         try {
             val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
             val end = System.currentTimeMillis()
-            val begin = end - 5000 // last 5 seconds
+            val begin = end - (15 * 60 * 1000) // last 15 minutes
             val events = usm.queryEvents(begin, end)
             val event = UsageEvents.Event()
             var lastForeground: String? = null
             while (events.hasNextEvent()) {
                 events.getNextEvent(event)
+                Log.d("AppBlocker", "USAGESTATS: Raw Event - Type: ${event.eventType}, Package: ${event.packageName}, Class: ${event.className}, Timestamp: ${event.timeStamp}")
                 if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
                     lastForeground = event.packageName
                     Log.d("AppBlocker", "USAGESTATS: ACTIVITY_RESUMED: $lastForeground")
                 }
             }
             val pkgName = lastForeground ?: run {
-                Log.d("AppBlocker", "USAGESTATS: No foreground app detected")
+                Log.d("AppBlocker", "USAGESTATS: No foreground app detected (check recent 15min)")
                 return
             }
             Log.d("AppBlocker", "USAGESTATS: Last foreground app: $pkgName")
-            if (pkgName == packageName || pkgName == "com.android.systemui" || pkgName == "com.android.launcher" || pkgName == "com.android.launcher3" || pkgName == "com.google.android.apps.nexuslauncher") {
-                return
-            }
-            if (!RewardManager.isAllowed(pkgName) || blockedPackages.contains(pkgName)) {
-                Log.d("AppBlocker", "USAGESTATS - BLOCKING access to: $pkgName - returning to launcher")
+            
+            // Only block if it's a reward-eligible app and reward minutes are 0
+            if (RewardManager.rewardEligibleApps.contains(pkgName) && RewardManager.currentRewardMinutes <= 0) {
+                Log.d("AppBlocker", "USAGESTATS - BLOCKING expired reward app: $pkgName - returning to launcher")
 
                 // Use device owner capabilities if available for stronger blocking
                 if (devicePolicyManager.isDeviceOwnerActive()) {
@@ -246,7 +227,10 @@ class AppBlockerService : AccessibilityService() {
                 }
 
                 returnToLauncher()
+                return
             }
+            // For all other apps, do nothing
+            return
         } catch (e: Exception) {
             Log.e("AppBlocker", "USAGESTATS: Error in checkUsageStats", e)
         }

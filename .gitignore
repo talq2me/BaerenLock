@@ -1,0 +1,25 @@
+gitignore
+# Folders and files created by Android Studio and Gradle
+# =======================================================
+# Gradle build cache
+/.gradle/
+# Kotlin build cache
+.kotlin/
+# IDE settings
+/.idea/
+# Local properties (contains SDK path)
+/local.properties
+# Module files
+*.iml
+
+# Build output
+# =======================================================
+# Ignore all directories named 'build' anywhere in the project
+**/build/
+# Native C++ build cache
+.cxx/
+
+# macOS files
+# ===========
+.DS_Store
+/app/src/main/java/com/talq2me/baerenlock/Baeren.code-workspace

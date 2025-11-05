@@ -1,20 +1,22 @@
 package com.talq2me.baerenlock
 
 import android.content.Context
-import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import java.io.File
+import android.content.SharedPreferences
+import android.content.Intent
+import androidx.localbroadcastmanager.content.LocalBroadcastManager // Import LocalBroadcastManager
+import android.app.usage.UsageStatsManager
+import android.app.ActivityManager
+import android.content.pm.PackageManager
+import android.content.ComponentName
 
 object RewardManager {
-    val allowedApps = mutableSetOf(
-        "com.talq2me.baerened", // BaerenEd app (will be part of memoryAllowedApps too)
-        "com.talq2me.baerenlock" // BaerenLock launcher (will be part of memoryAllowedApps too)
-    )
-    private val temporaryApps = mutableSetOf<String>()
-    private var timer: Handler? = null
-    private var runnable: Runnable? = null
+
+    var currentRewardMinutes: Int = 0
+    private var rewardTimer: Handler? = null
+    private var rewardRunnable: Runnable? = null
 
     // Fixed set of apps allowed to run in the background (memory control)
     private val memoryAllowedApps = setOf(
@@ -36,17 +38,28 @@ object RewardManager {
         "com.android.providers.downloads",
         "com.android.providers.media",
         "com.android.providers.calendar",
-        "com.android.providers.contacts"
+        "com.android.providers.contacts",
+        "com.android.packageinstaller", // For app installation/permissions
+        "com.google.android.packageinstaller", // Google's package installer
+        "com.android.vending", // Google Play Store
+        "com.google.android.settings.intelligence" // Google-specific settings intelligence
     )
+
+    val allowedApps = mutableSetOf(
+        "com.talq2me.baerened", // BaerenEd app (will be part of memoryAllowedApps too)
+        "com.talq2me.baerenlock" // BaerenLock launcher (will be part of memoryAllowedApps too)
+    )
+    private val temporaryApps = mutableSetOf<String>()
+    val rewardEligibleApps = mutableSetOf<String>() // New set to store user-configured reward apps
 
     fun grantAccess(context: Context, pkg: String, minutes: Int) {
         allowedApps.add(pkg)
         temporaryApps.add(pkg)
         saveAllowedApps(context)
 
-        runnable?.let { timer?.removeCallbacks(it) }
-        timer = Handler(Looper.getMainLooper())
-        runnable = Runnable {
+        rewardRunnable?.let { rewardTimer?.removeCallbacks(it) }
+        rewardTimer = Handler(Looper.getMainLooper())
+        rewardRunnable = Runnable {
             Log.d("RewardManager", "🚫 Reward time expired for $pkg - removing from allowed apps")
             allowedApps.remove(pkg)
             temporaryApps.remove(pkg)
@@ -58,17 +71,20 @@ object RewardManager {
             am.killBackgroundProcesses(pkg)
 
             // ✅ Return to launcher/home
-            val intent = Intent(Intent.ACTION_MAIN)
-            intent.addCategory(Intent.CATEGORY_HOME)
-            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
+            intent.addCategory(android.content.Intent.CATEGORY_HOME)
+            intent.flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
             context.startActivity(intent)
         }
-        timer?.postDelayed(runnable!!, minutes * 60 * 1000L)
+        rewardTimer?.postDelayed(rewardRunnable!!, minutes * 60 * 1000L)
     }
 
     fun isAllowed(pkg: String): Boolean {
-        val allowed = allowedApps.contains(pkg)
-        Log.d("RewardManager", "Checking if $pkg is allowed: $allowed (current allowed apps: $allowedApps)")
+        // An app is allowed if it's permanently whitelisted, temporarily allowed, OR
+        // if it's a reward-eligible app AND reward minutes are currently active.
+        val allowed = allowedApps.contains(pkg) ||
+                      temporaryApps.contains(pkg) ||
+                      (rewardEligibleApps.contains(pkg) && currentRewardMinutes > 0)
         return allowed
     }
 
@@ -102,6 +118,18 @@ object RewardManager {
         if (isPackageInstalled(context, "com.nianticlabs.pokemongo")) {
             allowedApps.add("com.nianticlabs.pokemongo")
         }
+
+        // Also add Baeren (web app) if it's installed (for launcher display)
+        if (isPackageInstalled(context, "com.talq2me.baeren")) {
+            allowedApps.add("com.talq2me.baeren")
+        }
+
+        // Load user-configured reward-eligible apps
+        val rewardPrefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val savedRewardApps = rewardPrefs.getStringSet("reward_apps", emptySet()) ?: emptySet()
+        rewardEligibleApps.clear()
+        rewardEligibleApps.addAll(savedRewardApps)
+        Log.d("RewardManager", "Loaded reward eligible apps: $rewardEligibleApps")
     }
 
     private fun isPackageInstalled(context: Context, packageName: String): Boolean {
@@ -124,7 +152,33 @@ object RewardManager {
                 return
             }
 
-            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val packageManager = context.packageManager
+
+            // Get the current foreground app to prevent killing it
+            var foregroundPackageName: String? = null
+            val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val time = System.currentTimeMillis()
+            val usageEvents = usageStatsManager.queryEvents(time - 1000 * 10, time)
+            val event = android.app.usage.UsageEvents.Event()
+            while (usageEvents.hasNextEvent()) {
+                usageEvents.getNextEvent(event)
+                if (event.eventType == android.app.usage.UsageEvents.Event.ACTIVITY_RESUMED) {
+                    foregroundPackageName = event.packageName
+                }
+            }
+
+            // Get the default launcher package to prevent killing it
+            val intent = Intent(Intent.ACTION_MAIN)
+            intent.addCategory(Intent.CATEGORY_HOME)
+            val resolveInfo = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            val defaultLauncherPackage = resolveInfo?.activityInfo?.packageName
+
+            val doNotKillList = mutableSetOf<String>()
+            foregroundPackageName?.let { doNotKillList.add(it) }
+            defaultLauncherPackage?.let { doNotKillList.add(it) }
+            doNotKillList.addAll(memoryAllowedApps)
+            doNotKillList.addAll(essentialSystemPackages)
 
             // Get running app processes
             val runningProcesses = activityManager.runningAppProcesses ?: return
@@ -133,15 +187,11 @@ object RewardManager {
             for (process in runningProcesses) {
                 val packageName = process.processName
 
-                // Skip apps explicitly allowed in memory (BaerenLock, BaerenEd, PokemonGo)
-                if (memoryAllowedApps.contains(packageName)) {
-                    continue
-                }
-
-                // Skip essential system processes (e.g., system UI, launcher, Android OS)
-                if (essentialSystemPackages.contains(packageName) ||
+                // Skip apps that are explicitly whitelisted or are critical system components
+                if (doNotKillList.contains(packageName) ||
                     packageName.startsWith("com.android.") ||
                     packageName.startsWith("android.")) {
+                    Log.d("RewardManager", "Skipping whitelisted/system app from killing: $packageName")
                     continue
                 }
 
@@ -247,105 +297,90 @@ object RewardManager {
         return allowedApps.toSet()
     }
 
-    /**
-     * Checks for pending reward time from BaerenEd and processes it
-     */
-    fun checkForPendingRewardTime(context: Context): Boolean {
-        val pendingReward = getPendingRewardData(context)
-        if (pendingReward != null) {
-            val (minutes, timestamp) = pendingReward
-            Log.d("RewardManager", "Found pending reward: $minutes minutes from ${java.util.Date(timestamp)}")
+    fun refreshRewardEligibleApps(context: Context) {
+        val rewardPrefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val savedRewardApps = rewardPrefs.getStringSet("reward_apps", emptySet()) ?: emptySet()
+        rewardEligibleApps.clear()
+        rewardEligibleApps.addAll(savedRewardApps)
+        Log.d("RewardManager", "Refreshed reward eligible apps: $rewardEligibleApps")
+    }
 
-            // Clear the pending data since we're about to use it
-            clearPendingRewardData(context)
+    fun saveRewardMinutes(context: Context) {
+        val prefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putInt("current_reward_minutes", currentRewardMinutes).apply()
+        Log.d("RewardManager", "Saved reward minutes to SharedPreferences: $currentRewardMinutes")
+    }
 
-            // Grant access to reward apps for the specified time
-            grantRewardTime(context, minutes)
-            return true
+    fun loadRewardMinutes(context: Context) {
+        val prefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
+        currentRewardMinutes = prefs.getInt("current_reward_minutes", 0)
+        Log.d("RewardManager", "Loaded reward minutes from SharedPreferences: $currentRewardMinutes")
+        if (currentRewardMinutes > 0) {
+            startRewardTimer(context)
         }
-        return false
     }
 
     /**
-     * Gets pending reward data from shared file
+     * Starts the reward timer to decrement minutes and update storage.
      */
-    private fun getPendingRewardData(context: Context): Pair<Int, Long>? {
-        return try {
-            val sharedFile = getSharedRewardFile(context)
-            if (!sharedFile.exists()) return null
+    fun startRewardTimer(context: Context) {
+        Log.d("RewardManager", "startRewardTimer called. Current minutes: $currentRewardMinutes")
+        
+        // Always remove any existing callbacks to prevent duplicate timers
+        rewardRunnable?.let { rewardTimer?.removeCallbacks(it) }
+        rewardTimer = Handler(Looper.getMainLooper())
 
-            val content = sharedFile.readText()
-            val lines = content.lines()
-            if (lines.size >= 2) {
-                val rewardMinutes = lines[0].toIntOrNull() ?: 0
-                val timestamp = lines[1].toLongOrNull() ?: 0L
+        rewardRunnable = object : Runnable {
+            override fun run() {
+                if (currentRewardMinutes > 0) {
+                    currentRewardMinutes -= 1 // Decrement every minute
+                    if (currentRewardMinutes < 0) currentRewardMinutes = 0
+                    saveRewardMinutes(context)
+                    Log.d("RewardManager", "Reward minutes decremented to: $currentRewardMinutes. Rescheduling timer.")
 
-                if (rewardMinutes > 0 && timestamp > 0) {
-                    // Check if data is not too old (more than 24 hours)
-                    val currentTime = System.currentTimeMillis()
-                    val oneDayInMillis = 24 * 60 * 60 * 1000L
-                    if (currentTime - timestamp < oneDayInMillis) {
-                        return Pair(rewardMinutes, timestamp)
+                    if (currentRewardMinutes == 0) {
+                        // Reward time is up, remove temporary apps
+                        allowedApps.removeAll(temporaryApps)
+                        temporaryApps.clear()
+                        saveAllowedApps(context)
+                        Log.d("RewardManager", "Reward time expired. Temporary apps removed. Killing reward apps.")
+
+                        // Kill reward-eligible apps that were granted access
+                        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                        for (pkg in rewardEligibleApps) {
+                            try {
+                                am.killBackgroundProcesses(pkg)
+                                Log.d("RewardManager", "Killed reward-eligible app: $pkg")
+                            } catch (e: Exception) {
+                                Log.w("RewardManager", "Failed to kill reward-eligible app $pkg: ${e.message}")
+                            }
+                        }
+
+                        // Send broadcast to LauncherActivity to refresh UI
+                        val intent = Intent(LauncherActivity.ACTION_REWARD_EXPIRED)
+                        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
+                        Log.d("RewardManager", "Sent ACTION_REWARD_EXPIRED broadcast.")
+
+                        // Stop the timer since reward time is 0
+                        rewardTimer?.removeCallbacks(this)
+                        rewardRunnable = null
+                        Log.d("RewardManager", "Reward timer stopped as minutes reached 0.")
+
+                    } else {
+                        // Schedule next decrement for 1 minute
+                        rewardTimer?.postDelayed(this, 1 * 60 * 1000L)
                     }
+                } else {
+                    // No reward time left, stop the timer
+                    rewardTimer?.removeCallbacks(this)
+                    rewardRunnable = null
+                    Log.d("RewardManager", "Reward timer stopped.")
                 }
             }
-            null
-        } catch (e: Exception) {
-            Log.e("RewardManager", "Error reading shared reward file", e)
-            null
-        }
-    }
-
-    /**
-     * Clears pending reward data from shared file
-     */
-    private fun clearPendingRewardData(context: Context) {
-        try {
-            val sharedFile = getSharedRewardFile(context)
-            if (sharedFile.exists()) {
-                sharedFile.delete()
-            }
-        } catch (e: Exception) {
-            Log.e("RewardManager", "Error clearing shared reward file", e)
-        }
-    }
-
-    /**
-     * Gets the shared reward file that both apps can access
-     */
-    private fun getSharedRewardFile(context: Context): File {
-        // Use external files directory if available, otherwise use internal
-        val externalDir = context.getExternalFilesDir(null)
-        val sharedDir = if (externalDir != null) {
-            File(externalDir, "shared")
-        } else {
-            File(context.filesDir, "shared")
         }
 
-        if (!sharedDir.exists()) {
-            sharedDir.mkdirs()
-        }
-
-        return File(sharedDir, "baeren_reward_data.txt")
-    }
-
-    /**
-     * Grants reward time to all reward-eligible apps
-     */
-    private fun grantRewardTime(context: Context, minutes: Int) {
-        // Grant access to reward apps (you can customize which apps get reward time)
-        val rewardPackages = listOf(
-            "com.nianticlabs.pokemongo",  // Pokemon GO
-            "com.roblox.client",          // Roblox
-            "com.mojang.minecraftpe",     // Minecraft
-            // Add other reward-eligible apps here
-        )
-
-        for (pkg in rewardPackages) {
-            if (isPackageInstalled(context, pkg)) {
-                Log.d("RewardManager", "Granting $minutes minutes of reward time to $pkg")
-                grantAccess(context, pkg, minutes)
-            }
-        }
+        // Start the runnable immediately to process the current state and then schedule for future
+        rewardTimer?.post(rewardRunnable!!)
+        Log.d("RewardManager", "Reward timer initiated. First run scheduled immediately.")
     }
 }

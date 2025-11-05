@@ -16,7 +16,11 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.activity.OnBackPressedCallback
+import androidx.localbroadcastmanager.content.LocalBroadcastManager // Import LocalBroadcastManager
+import android.content.BroadcastReceiver
+import android.content.IntentFilter // Import IntentFilter
 import java.util.Calendar
+import android.content.Context
 import android.content.SharedPreferences
 
 class LauncherActivity : AppCompatActivity() {
@@ -26,10 +30,22 @@ class LauncherActivity : AppCompatActivity() {
     private lateinit var appGrid: GridLayout
     private var accessibilityBanner: Button? = null
     private lateinit var prefs: SharedPreferences
+    private var rewardMinutesTextView: TextView? = null
 
     companion object {
         private const val PROFILE_KEY = "user_profile"
         private const val TAG = "LauncherActivity"
+        private const val REWARD_UPDATE_INTERVAL = 5 * 60 * 1000L // 5 minutes in milliseconds
+        const val ACTION_REWARD_EXPIRED = "com.talq2me.baerenlock.ACTION_REWARD_EXPIRED" // Define custom action
+    }
+
+    private val rewardExpiredReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_REWARD_EXPIRED) {
+                Log.d(TAG, "Received ACTION_REWARD_EXPIRED broadcast. Refreshing UI.")
+                updateRewardMinutesDisplay()
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -41,22 +57,7 @@ class LauncherActivity : AppCompatActivity() {
         val userProfile = getOrCreateProfile()
         Log.d(TAG, "Current user profile: $userProfile")
 
-        // Set up the OnBackPressedCallback
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                // Do nothing to disable the back button in the launcher activity
-            }
-        })
-
-        RewardManager.loadAllowedApps(this)
-
-        // Check for any pending reward time from BaerenEd
-        RewardManager.checkForPendingRewardTime(this)
-
-        // Check if accessibility service is enabled (will be updated by onResume anyway)
-        // val isEnabled = isAccessibilityServiceEnabled()
-        // Log.d("LauncherActivity", "Accessibility service enabled: $isEnabled")
-
+        // --- Start UI Initialization (moved up) ---
         val background = createDailyBackgroundImageView(userProfile)
 
         val contentLayout = LinearLayout(this).apply {
@@ -89,22 +90,37 @@ class LauncherActivity : AppCompatActivity() {
         val settingsButton = ImageButton(this).apply {
             setImageResource(R.drawable.ic_settings)
             setBackgroundColor(Color.TRANSPARENT)
-            setPadding(16, 16, 16, 16) // Add padding for larger touch target
-            layoutParams = LinearLayout.LayoutParams(80, 80) // Make button bigger
+            setPadding(16, 16, 16, 16)
+            layoutParams = LinearLayout.LayoutParams(80, 80)
             setOnClickListener {
                 showPinPrompt(onSuccess = {
                     showSettingsMenu()
                 })
             }
         }
-
         topBar.addView(settingsButton)
+
+        rewardMinutesTextView = TextView(this).apply {
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setPadding(16, 16, 16, 16)
+            gravity = Gravity.CENTER_VERTICAL
+            text = "Reward: 0 min"
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                weight = 1.0f
+                gravity = Gravity.START
+            }
+        }
+        topBar.addView(rewardMinutesTextView)
 
         val breakGlassButton = ImageButton(this).apply {
             setImageResource(R.drawable.exit_launcher)
             setBackgroundColor(Color.TRANSPARENT)
-            setPadding(16, 16, 16, 16) // Add padding for larger touch target
-            layoutParams = LinearLayout.LayoutParams(80, 80) // Make button bigger
+            setPadding(16, 16, 16, 16)
+            layoutParams = LinearLayout.LayoutParams(80, 80)
             setOnClickListener {
                 showPinPrompt(onSuccess = {
                     exitLauncher()
@@ -115,16 +131,14 @@ class LauncherActivity : AppCompatActivity() {
 
         val webAppButton = Button(this).apply {
             text = "Baeren"
-            setOnClickListener { 
+            setOnClickListener {
                 startActivity(Intent(this@LauncherActivity, MainActivity::class.java))
             }
         }
-        
+
         appGrid = GridLayout(this).apply {
-            // Adaptive grid based on orientation
             val displayMetrics = resources.displayMetrics
             val isLandscape = displayMetrics.widthPixels > displayMetrics.heightPixels
-            
             columnCount = if (isLandscape) 8 else 5
             useDefaultMargins = false
         }
@@ -133,11 +147,96 @@ class LauncherActivity : AppCompatActivity() {
         contentLayout.addView(webAppButton)
         contentLayout.addView(appGrid)
 
-        setContentView(root)
+        setContentView(root) // Set content view after all essential UI is added
 
-        // Accessibility banner update will happen in onResume
-        // updateAccessibilityBanner(contentLayout)
+        // --- End UI Initialization ---
+
+
+        // Set up the OnBackPressedCallback (can stay here)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                // Do nothing to disable the back button in the launcher activity
+            }
+        })
+
+        RewardManager.loadAllowedApps(this)
+        RewardManager.loadRewardMinutes(this) // Load reward minutes on launch
+
+        // Check for reward minutes passed from BaerenEd
+        val incomingRewardMinutes = intent.getIntExtra("reward_minutes", 0)
+        if (incomingRewardMinutes > 0) {
+            RewardManager.currentRewardMinutes += incomingRewardMinutes
+            RewardManager.saveRewardMinutes(this)
+            Log.d(TAG, "After saving, RewardManager.currentRewardMinutes is: ${RewardManager.currentRewardMinutes}") // New log
+            Log.d(TAG, "Received $incomingRewardMinutes reward minutes from Intent. Total: ${RewardManager.currentRewardMinutes}")
+            // Consume the intent extra so it's not processed again on recreate
+            intent.removeExtra("reward_minutes")
+            updateRewardMinutesDisplay() // This call should now be safe
+        }
+
+        // The remaining calls for refreshIcons and startRewardDisplayUpdate are safe here
         refreshIcons(appGrid)
+        startRewardDisplayUpdate()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Refresh the app grid when returning from settings
+        refreshIcons(appGrid)
+        // Get the content layout properly - it's the parent of appGrid
+        val contentLayout = appGrid.parent as? LinearLayout
+        contentLayout?.let { updateAccessibilityBanner(it) }
+
+        // Load reward minutes and start the timer when activity resumes/becomes active
+        RewardManager.loadRewardMinutes(this)
+        if (RewardManager.currentRewardMinutes > 0) {
+            Log.d(TAG, "onResume: Reward minutes present (${RewardManager.currentRewardMinutes} min). Starting RewardManager timer.")
+            RewardManager.startRewardTimer(this)
+        } else {
+            Log.d(TAG, "onResume: No reward minutes present. Not starting RewardManager timer.")
+        }
+
+        startRewardDisplayUpdate() // Start or restart the update when activity resumes
+
+        // Register the BroadcastReceiver
+        LocalBroadcastManager.getInstance(this).registerReceiver(
+            rewardExpiredReceiver, IntentFilter(ACTION_REWARD_EXPIRED)
+        )
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopRewardDisplayUpdate() // Stop the update when activity pauses
+
+        // Unregister the BroadcastReceiver
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(rewardExpiredReceiver)
+    }
+
+    private fun startRewardDisplayUpdate() {
+        rewardRunnable?.let { handler.removeCallbacks(it) }
+        rewardRunnable = object : Runnable {
+            override fun run() {
+                updateRewardMinutesDisplay()
+                handler.postDelayed(this, 1000L) // Update every second
+            }
+        }
+        handler.post(rewardRunnable!!)
+        Log.d(TAG, "Reward display update started.")
+    }
+
+    private fun stopRewardDisplayUpdate() {
+        rewardRunnable?.let { handler.removeCallbacks(it) }
+        rewardRunnable = null
+        Log.d(TAG, "Reward display update stopped.")
+    }
+
+    private fun updateRewardMinutesDisplay() {
+        val minutes = RewardManager.currentRewardMinutes
+        Log.d(TAG, "Updating reward minutes display to: $minutes") // Add logging here
+        runOnUiThread {
+            rewardMinutesTextView?.text = "Reward: $minutes min"
+            refreshIcons(appGrid) // Refresh icons to show/hide reward apps
+        }
     }
 
     private fun getOrCreateProfile(): String {
@@ -173,9 +272,12 @@ class LauncherActivity : AppCompatActivity() {
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),
             0
         )
-        
-        val allowedApps = apps.filter { RewardManager.allowedApps.contains(it.activityInfo.packageName) }
-        
+
+        val allowedApps = apps.filter { info ->
+            val packageName = info.activityInfo.packageName
+            RewardManager.isAllowed(packageName) // Use RewardManager.isAllowed to determine visibility
+        }
+
         // Update grid dimensions based on current orientation
         val displayMetrics = resources.displayMetrics
         val isLandscape = displayMetrics.widthPixels > displayMetrics.heightPixels
@@ -248,7 +350,7 @@ class LauncherActivity : AppCompatActivity() {
             } else {
                 Toast.makeText(this, "Incorrect PIN", Toast.LENGTH_SHORT).show()
                 showPinPrompt(onSuccess)
-            }
+            } 
         }
     }
 
@@ -309,15 +411,6 @@ class LauncherActivity : AppCompatActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        // Refresh the app grid when returning from settings
-        refreshIcons(appGrid)
-        // Get the content layout properly - it's the parent of appGrid
-        val contentLayout = appGrid.parent as? LinearLayout
-        contentLayout?.let { updateAccessibilityBanner(it) }
     }
 
     private fun updateAccessibilityBanner(contentLayout: LinearLayout) {
