@@ -11,6 +11,10 @@ gitignore
 /local.properties
 # Module files
 *.iml
+# IDE and build files
+.gradle/
+.idea/
+
 
 # Build output
 # =======================================================
