@@ -1,7 +1,11 @@
 package com.talq2me.baerenlock
 
+import android.content.BroadcastReceiver
+import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
@@ -12,16 +16,11 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
-import androidx.activity.OnBackPressedCallback
-import androidx.localbroadcastmanager.content.LocalBroadcastManager // Import LocalBroadcastManager
-import android.content.BroadcastReceiver
-import android.content.IntentFilter // Import IntentFilter
-import java.util.Calendar
-import android.content.Context
-import android.content.SharedPreferences
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import com.talq2me.contract.SettingsContract
 
 class LauncherActivity : AppCompatActivity() {
 
@@ -33,10 +32,8 @@ class LauncherActivity : AppCompatActivity() {
     private var rewardMinutesTextView: TextView? = null
 
     companion object {
-        private const val PROFILE_KEY = "user_profile"
         private const val TAG = "LauncherActivity"
-        private const val REWARD_UPDATE_INTERVAL = 5 * 60 * 1000L // 5 minutes in milliseconds
-        const val ACTION_REWARD_EXPIRED = "com.talq2me.baerenlock.ACTION_REWARD_EXPIRED" // Define custom action
+        const val ACTION_REWARD_EXPIRED = "com.talq2me.baerenlock.ACTION_REWARD_EXPIRED"
     }
 
     private val rewardExpiredReceiver = object : BroadcastReceiver() {
@@ -51,13 +48,10 @@ class LauncherActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        prefs = getSharedPreferences("com.talq2me.baerenlock.prefs", Context.MODE_PRIVATE)
 
-        // Determine or create user profile on first launch
-        val userProfile = getOrCreateProfile()
-        Log.d(TAG, "Current user profile: $userProfile")
+        val userProfile = readProfile()
 
-        // --- Start UI Initialization (moved up) ---
         val background = createDailyBackgroundImageView(userProfile)
 
         val contentLayout = LinearLayout(this).apply {
@@ -70,7 +64,6 @@ class LauncherActivity : AppCompatActivity() {
             addView(contentLayout)
         }
 
-        // Accessibility banner placeholder
         accessibilityBanner = Button(this).apply {
             text = "Enable Protection (Accessibility)"
             setBackgroundColor(0xFFE57373.toInt())
@@ -147,58 +140,43 @@ class LauncherActivity : AppCompatActivity() {
         contentLayout.addView(webAppButton)
         contentLayout.addView(appGrid)
 
-        setContentView(root) // Set content view after all essential UI is added
+        setContentView(root)
 
-        // --- End UI Initialization ---
+        if (userProfile == null) {
+            getOrCreateProfile()
+        }
 
-
-        // Set up the OnBackPressedCallback (can stay here)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                // Do nothing to disable the back button in the launcher activity
-            }
+            override fun handleOnBackPressed() {}
         })
 
         RewardManager.loadAllowedApps(this)
-        RewardManager.loadRewardMinutes(this) // Load reward minutes on launch
+        RewardManager.loadRewardMinutes(this)
 
-        // Check for reward minutes passed from BaerenEd
         val incomingRewardMinutes = intent.getIntExtra("reward_minutes", 0)
         if (incomingRewardMinutes > 0) {
             RewardManager.currentRewardMinutes += incomingRewardMinutes
             RewardManager.saveRewardMinutes(this)
-            Log.d(TAG, "After saving, RewardManager.currentRewardMinutes is: ${RewardManager.currentRewardMinutes}") // New log
-            Log.d(TAG, "Received $incomingRewardMinutes reward minutes from Intent. Total: ${RewardManager.currentRewardMinutes}")
-            // Consume the intent extra so it's not processed again on recreate
             intent.removeExtra("reward_minutes")
-            updateRewardMinutesDisplay() // This call should now be safe
+            updateRewardMinutesDisplay()
         }
 
-        // The remaining calls for refreshIcons and startRewardDisplayUpdate are safe here
         refreshIcons(appGrid)
         startRewardDisplayUpdate()
     }
 
     override fun onResume() {
         super.onResume()
-        // Refresh the app grid when returning from settings
         refreshIcons(appGrid)
-        // Get the content layout properly - it's the parent of appGrid
-        val contentLayout = appGrid.parent as? LinearLayout
-        contentLayout?.let { updateAccessibilityBanner(it) }
+        updateAccessibilityBanner(appGrid.parent as ViewGroup)
 
-        // Load reward minutes and start the timer when activity resumes/becomes active
         RewardManager.loadRewardMinutes(this)
         if (RewardManager.currentRewardMinutes > 0) {
-            Log.d(TAG, "onResume: Reward minutes present (${RewardManager.currentRewardMinutes} min). Starting RewardManager timer.")
             RewardManager.startRewardTimer(this)
-        } else {
-            Log.d(TAG, "onResume: No reward minutes present. Not starting RewardManager timer.")
         }
 
-        startRewardDisplayUpdate() // Start or restart the update when activity resumes
+        startRewardDisplayUpdate()
 
-        // Register the BroadcastReceiver
         LocalBroadcastManager.getInstance(this).registerReceiver(
             rewardExpiredReceiver, IntentFilter(ACTION_REWARD_EXPIRED)
         )
@@ -206,9 +184,7 @@ class LauncherActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        stopRewardDisplayUpdate() // Stop the update when activity pauses
-
-        // Unregister the BroadcastReceiver
+        stopRewardDisplayUpdate()
         LocalBroadcastManager.getInstance(this).unregisterReceiver(rewardExpiredReceiver)
     }
 
@@ -217,77 +193,125 @@ class LauncherActivity : AppCompatActivity() {
         rewardRunnable = object : Runnable {
             override fun run() {
                 updateRewardMinutesDisplay()
-                handler.postDelayed(this, 1000L) // Update every second
+                handler.postDelayed(this, 1000L)
             }
         }
         handler.post(rewardRunnable!!)
-        Log.d(TAG, "Reward display update started.")
     }
 
     private fun stopRewardDisplayUpdate() {
         rewardRunnable?.let { handler.removeCallbacks(it) }
         rewardRunnable = null
-        Log.d(TAG, "Reward display update stopped.")
     }
 
     private fun updateRewardMinutesDisplay() {
         val minutes = RewardManager.currentRewardMinutes
-        Log.d(TAG, "Updating reward minutes display to: $minutes") // Add logging here
         runOnUiThread {
             rewardMinutesTextView?.text = "Reward: $minutes min"
-            refreshIcons(appGrid) // Refresh icons to show/hide reward apps
+            refreshIcons(appGrid)
         }
     }
 
-    private fun getOrCreateProfile(): String {
-        var profile = prefs.getString(PROFILE_KEY, null)
-        if (profile == null) {
-            // First launch, prompt user for profile selection
-            val profiles = arrayOf("Profile A", "Profile B")
-            AlertDialog.Builder(this)
-                .setTitle("Select User Profile")
-                .setCancelable(false) // Must choose a profile
-                .setItems(profiles) { dialog, which ->
-                    profile = when (which) {
-                        0 -> "A"
-                        1 -> "B"
-                        else -> "A" // Default to A
-                    }
-                    prefs.edit().putString(PROFILE_KEY, profile).apply()
-                    Log.d(TAG, "Selected new profile: $profile")
-                    // Recreate activity to apply new background
-                    recreate()
+    private fun readProfile(): String? {
+        try {
+            contentResolver.query(SettingsContract.CONTENT_URI, arrayOf(SettingsContract.KEY_PROFILE), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    return cursor.getString(cursor.getColumnIndexOrThrow(SettingsContract.KEY_PROFILE))
                 }
-                .show()
-            // Return a default for now, recreate() will handle the actual application
-            return "A"
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read profile from provider.", e)
         }
-        return profile!!
+        return null
+    }
+
+    private fun writeProfile(newProfile: String) {
+        val values = ContentValues().apply {
+            put(SettingsContract.KEY_PROFILE, newProfile)
+        }
+        try {
+            contentResolver.update(SettingsContract.CONTENT_URI, values, null, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write profile to provider.", e)
+        }
+    }
+
+    private fun getOrCreateProfile(): String? {
+        readProfile()?.let { return it }
+
+        val profiles = arrayOf("Profile A", "Profile B")
+        AlertDialog.Builder(this)
+            .setTitle("Select User Profile")
+            .setCancelable(false)
+            .setItems(profiles) { _, which ->
+                val selectedProfile = if (which == 0) "A" else "B"
+                writeProfile(selectedProfile)
+                finishAffinity()
+                startActivity(Intent(this, LauncherActivity::class.java))
+            }
+            .show()
+        return null
+    }
+
+    private fun readPin(): String? {
+        try {
+            contentResolver.query(SettingsContract.CONTENT_URI, arrayOf(SettingsContract.KEY_PIN), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    return cursor.getString(cursor.getColumnIndexOrThrow(SettingsContract.KEY_PIN))
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read PIN from provider.", e)
+        }
+        return null
+    }
+
+    private fun writePin(newPin: String) {
+        val values = ContentValues().apply {
+            put(SettingsContract.KEY_PIN, newPin)
+        }
+        try {
+            contentResolver.update(SettingsContract.CONTENT_URI, values, null, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write PIN to provider.", e)
+        }
+    }
+
+    private fun readEmail(): String? {
+        try {
+            contentResolver.query(SettingsContract.CONTENT_URI, arrayOf(SettingsContract.KEY_PARENT_EMAIL), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    return cursor.getString(cursor.getColumnIndexOrThrow(SettingsContract.KEY_PARENT_EMAIL))
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read email from provider.", e)
+        }
+        return null
+    }
+
+    private fun writeEmail(newEmail: String) {
+        val values = ContentValues().apply {
+            put(SettingsContract.KEY_PARENT_EMAIL, newEmail)
+        }
+        try {
+            contentResolver.update(SettingsContract.CONTENT_URI, values, null, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write email to provider.", e)
+        }
     }
 
     private fun refreshIcons(container: ViewGroup) {
         container.removeAllViews()
         val pm = packageManager
-        val apps = pm.queryIntentActivities(
-            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),
-            0
-        )
+        val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
+        val allowedApps = apps.filter { RewardManager.isAllowed(it.activityInfo.packageName) }
 
-        val allowedApps = apps.filter { info ->
-            val packageName = info.activityInfo.packageName
-            RewardManager.isAllowed(packageName) // Use RewardManager.isAllowed to determine visibility
-        }
-
-        // Update grid dimensions based on current orientation
-        val displayMetrics = resources.displayMetrics
-        val isLandscape = displayMetrics.widthPixels > displayMetrics.heightPixels
-        val columns = if (isLandscape) 8 else 5
-        
-        // Update the grid's column count
         if (container is GridLayout) {
-            container.columnCount = columns
+            val displayMetrics = resources.displayMetrics
+            container.columnCount = if (displayMetrics.widthPixels > displayMetrics.heightPixels) 8 else 5
         }
-        
+
         allowedApps.forEach { ri ->
             val appLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -298,123 +322,187 @@ class LauncherActivity : AppCompatActivity() {
                     setMargins(4, 4, 4, 4)
                 }
             }
-
             val icon = ImageView(this).apply {
                 setImageDrawable(ri.loadIcon(pm))
                 scaleType = ImageView.ScaleType.CENTER_INSIDE
                 layoutParams = LinearLayout.LayoutParams(120, 120)
                 setOnClickListener {
-                    if (ri.activityInfo.packageName == packageName) {
-                        val intent = Intent(this@LauncherActivity, MainActivity::class.java)
-                        startActivity(intent)
-                    } else {
-                        val intent = packageManager.getLaunchIntentForPackage(ri.activityInfo.packageName)
-                        if (intent != null) startActivity(intent)
-                    }
+                    packageManager.getLaunchIntentForPackage(ri.activityInfo.packageName)?.let { startActivity(it) }
                 }
             }
-
             val label = TextView(this).apply {
-                text = ri.loadLabel(pm).toString()
+                text = ri.loadLabel(pm)
                 gravity = Gravity.CENTER
                 setTextColor(Color.WHITE)
                 textSize = 10f
                 maxLines = 1
-                isSingleLine = true
-                ellipsize = android.text.TextUtils.TruncateAt.END
             }
-
             appLayout.addView(icon)
             appLayout.addView(label)
             container.addView(appLayout)
         }
     }
 
-    private fun launchApp(pkg: String) {
-        val intent = packageManager.getLaunchIntentForPackage(pkg)
-        if (intent != null) startActivity(intent)
-        else Toast.makeText(this, "App not installed", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun bringHome() {
-        val home = Intent(this, LauncherActivity::class.java)
-        home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        startActivity(home)
-    }
-
     private fun showPinPrompt(onSuccess: () -> Unit) {
-        val storedPin = prefs.getString("parent_pin", "1234") ?: "1234"
-        PinPromptDialog.show(this, "Enter PIN") { enteredPin ->
-            if (enteredPin == storedPin) {
-                onSuccess()
-            } else {
-                Toast.makeText(this, "Incorrect PIN", Toast.LENGTH_SHORT).show()
-                showPinPrompt(onSuccess)
-            } 
+        val storedPin = readPin() ?: "1234"
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                leftMargin = 50; rightMargin = 50
+            }
         }
+        val container = FrameLayout(this)
+        container.addView(input)
+
+        AlertDialog.Builder(this)
+            .setTitle("Enter PIN")
+            .setView(container)
+            .setPositiveButton("OK") { _, _ ->
+                if (input.text.toString() == storedPin) onSuccess() else Toast.makeText(this, "Incorrect PIN", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
         val expected = "$packageName/${AppBlockerService::class.java.name}"
-        val enabledServices = android.provider.Settings.Secure.getString(
-            contentResolver,
-            android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: return false
-
-        // Check for both flattened and unflattened names
-        return enabledServices.split(':').any {
-            it.equals(expected, ignoreCase = true) ||
-            it.endsWith(AppBlockerService::class.java.name, ignoreCase = true)
-        }
+        val enabledServices = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        return enabledServices?.split(':')?.any { it.equals(expected, ignoreCase = true) } ?: false
     }
 
     private fun showSettingsMenu() {
+        val options = arrayOf("App Whitelist", "Reward Apps", "Change PIN", "Change Profile", "Change Parent Email")
         AlertDialog.Builder(this)
             .setTitle("Settings")
-            .setItems(arrayOf("App Whitelist", "Reward Apps", "Parent Email Settings", "Change PIN")) { _, which ->
+            .setItems(options) { _, which ->
                 when (which) {
-                    0 -> startActivity(Intent(this@LauncherActivity, WhitelistSettingsActivity::class.java))
-                    1 -> startActivity(Intent(this@LauncherActivity, RewardAppsSettingsActivity::class.java))
-                    2 -> startActivity(Intent(this@LauncherActivity, SettingsActivity::class.java))
-                    3 -> startActivity(Intent(this@LauncherActivity, ChangePinActivity::class.java))
+                    0 -> startActivity(Intent(this, WhitelistSettingsActivity::class.java))
+                    1 -> startActivity(Intent(this, RewardAppsSettingsActivity::class.java))
+                    2 -> showChangePinDialog()
+                    3 -> showChangeProfileDialog()
+                    4 -> showChangeEmailDialog()
+                }
+            }
+            .show()
+    }
+
+    private fun showChangeProfileDialog() {
+        val profiles = arrayOf("Profile A", "Profile B")
+        val currentProfile = readProfile()
+        AlertDialog.Builder(this)
+            .setTitle("Select User Profile")
+            .setItems(profiles) { _, which ->
+                val selectedProfile = if (which == 0) "A" else "B"
+                if (currentProfile != selectedProfile) {
+                    writeProfile(selectedProfile)
+                    finishAffinity()
+                    startActivity(Intent(this, LauncherActivity::class.java))
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun exitLauncher() {
-        val intent = Intent(android.provider.Settings.ACTION_HOME_SETTINGS)
-        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        startActivity(intent)
-
-        Toast.makeText(this, "Choose a different default launcher in settings.", Toast.LENGTH_LONG).show()
-    }
-
-    private fun createDailyBackgroundImageView(userProfile: String): ImageView {
-        val backgrounds = when (userProfile) {
-            "A" -> listOf(R.drawable.bg_a_1_orig, R.drawable.bg_a_2_orig, R.drawable.bg_a_3_orig)
-            "B" -> listOf(R.drawable.bg_b_1_orig, R.drawable.bg_b_2_orig, R.drawable.bg_b_3_orig)
-            else -> listOf(R.drawable.bg_a_1_orig, R.drawable.bg_a_2_orig, R.drawable.bg_a_3_orig) // Default to A
+    private fun showChangePinDialog() {
+        val dialogLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 50, 50, 50)
         }
 
-        val dayOfYear = Calendar.getInstance().get(Calendar.DAY_OF_YEAR)
-        val index = dayOfYear % backgrounds.size
+        val newPinInput = EditText(this).apply {
+            hint = "Enter new PIN"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+        }
+        dialogLayout.addView(newPinInput)
 
-        val bgRes = backgrounds[index]
+        val confirmPinInput = EditText(this).apply {
+            hint = "Confirm new PIN"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+        }
+        dialogLayout.addView(confirmPinInput)
 
+        AlertDialog.Builder(this)
+            .setTitle("Change PIN")
+            .setView(dialogLayout)
+            .setPositiveButton("Save") { _, _ ->
+                val newPin = newPinInput.text.toString()
+                val confirmPin = confirmPinInput.text.toString()
+
+                if (newPin.isNotEmpty() && newPin == confirmPin) {
+                    writePin(newPin)
+                    Toast.makeText(this, "PIN changed successfully", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "PINs do not match or are empty", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showChangeEmailDialog() {
+        val currentEmail = readEmail() ?: ""
+        val input = EditText(this).apply {
+            hint = "Parent Email Address"
+            setText(currentEmail)
+            inputType = InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+        }
+
+        val container = FrameLayout(this).apply {
+            setPadding(50, 20, 50, 20)
+            addView(input)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Change Parent Email")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                val newEmail = input.text.toString().trim()
+                if (newEmail.isNotEmpty() && android.util.Patterns.EMAIL_ADDRESS.matcher(newEmail).matches()) {
+                    writeEmail(newEmail)
+                    Toast.makeText(this, "Email saved successfully", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Please enter a valid email address", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun createDailyBackgroundImageView(userProfile: String?): ImageView {
         return ImageView(this).apply {
-            setImageResource(bgRes)
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
             scaleType = ImageView.ScaleType.CENTER_CROP
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
+
+            if (userProfile == null) {
+                setBackgroundColor(Color.GRAY)
+                return@apply
+            }
+
+            val prefix = if (userProfile == "A") "bg_a_" else "bg_b_"
+            val fields = R.drawable::class.java.fields
+            val drawables = fields.filter { it.name.startsWith(prefix) }
+
+            if (drawables.isNotEmpty()) {
+                val randomDrawableId = drawables.random().getInt(null)
+                setImageResource(randomDrawableId)
+            } else {
+                // Fallback to a solid color if no matching images are found
+                setBackgroundColor(if (userProfile == "A") Color.BLUE else Color.DKGRAY)
+            }
         }
     }
 
-    private fun updateAccessibilityBanner(contentLayout: LinearLayout) {
-        val isEnabled = isAccessibilityServiceEnabled()
-        accessibilityBanner?.visibility = if (isEnabled) View.GONE else View.VISIBLE
+    private fun exitLauncher() {
+        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        // Create and start a chooser, forcing the user to select a launcher.
+        val chooser = Intent.createChooser(homeIntent, "Select Home App")
+        startActivity(chooser)
+    }
+
+    private fun updateAccessibilityBanner(container: ViewGroup) {
+        accessibilityBanner?.visibility = if (isAccessibilityServiceEnabled()) View.GONE else View.VISIBLE
     }
 }

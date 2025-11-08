@@ -11,6 +11,7 @@ import android.app.usage.UsageStatsManager
 import android.app.ActivityManager
 import android.content.pm.PackageManager
 import android.content.ComponentName
+import com.talq2me.baerenlock.LauncherActivity
 
 object RewardManager {
 
