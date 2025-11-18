@@ -6,7 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -77,7 +79,11 @@ class LauncherActivity : AppCompatActivity() {
 
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
         }
 
         val settingsButton = ImageButton(this).apply {
@@ -93,6 +99,20 @@ class LauncherActivity : AppCompatActivity() {
         }
         topBar.addView(settingsButton)
 
+        val versionTextView = TextView(this).apply {
+            text = getVersionLabel()
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(16, 16, 16, 16)
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        }
+        topBar.addView(versionTextView)
+
         rewardMinutesTextView = TextView(this).apply {
             textSize = 18f
             setTextColor(Color.WHITE)
@@ -102,10 +122,7 @@ class LauncherActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                weight = 1.0f
-                gravity = Gravity.START
-            }
+            )
         }
         topBar.addView(rewardMinutesTextView)
 
@@ -209,6 +226,24 @@ class LauncherActivity : AppCompatActivity() {
         runOnUiThread {
             rewardMinutesTextView?.text = "Reward: $minutes min"
             refreshIcons(appGrid)
+        }
+    }
+
+    private fun getVersionLabel(): String {
+        return try {
+            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.PackageInfoFlags.of(0)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(packageName, 0)
+            }
+            val name = packageInfo.versionName ?: packageInfo.longVersionCode.toString()
+            "v$name"
+        } catch (e: Exception) {
+            "v?"
         }
     }
 

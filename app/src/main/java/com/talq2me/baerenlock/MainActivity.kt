@@ -1,7 +1,11 @@
 package com.talq2me.baerenlock
 
-import android.app.AlertDialog
+import android.content.pm.PackageInstaller
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.*
 import android.webkit.*
 import android.widget.Toast
@@ -13,7 +17,6 @@ import android.speech.tts.UtteranceProgressListener
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import java.util.*
-import android.content.Context
 import android.util.Log
 import android.widget.LinearLayout
 import android.widget.GridLayout
@@ -22,19 +25,40 @@ import android.widget.TextView
 import android.widget.ScrollView
 import android.widget.EditText
 import android.widget.Button
-import androidx.core.view.ViewCompat.setLayerType
 import android.view.View
+// download updates 
+import android.app.DownloadManager
+import android.os.Environment
+import androidx.appcompat.app.AlertDialog
+import androidx.core.content.FileProvider
+import com.talq2me.baerenlock.DevicePolicyManager as CustomDevicePolicyManager
+import java.io.File
+import org.json.JSONObject
+import java.net.URL
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private lateinit var webView: WebView
     private lateinit var tts: TextToSpeech
     private var rewardAppDialog: AlertDialog? = null
+    private var updateDownloadId: Long = -1L
+    private val updateDownloadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) ?: return
+            if (id == updateDownloadId && updateDownloadId != -1L) {
+                handleDownloadedUpdate()
+            }
+        }
+    }
 
     private lateinit var requestOverlayPermissionLauncher: ActivityResultLauncher<Intent>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        checkForUpdate(this)
+
+        registerUpdateReceiver()
 
         requestOverlayPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
@@ -85,7 +109,142 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     }
 
+    private fun registerUpdateReceiver() {
+        val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(updateDownloadReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(updateDownloadReceiver, filter)
+        }
+    }
 
+    fun checkForUpdate(context: Context) {
+        Thread {
+            try {
+                // Check for internet first
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                val network = cm.activeNetwork
+                if (network == null) {
+                    println("No internet — skipping update check.")
+                    return@Thread
+                }
+
+                // Download JSON from GitHub Pages
+                val jsonText = URL("https://talq2me.github.io/BaerenLock/app/release/version.json")
+                    .readText()
+
+                val json = JSONObject(jsonText)
+                val latestVersion = json.getInt("latestVersionCode")
+                val apkUrl = json.getString("apkUrl")
+
+                val currentVersion = context.packageManager
+                    .getPackageInfo(context.packageName, 0).longVersionCode
+
+                if (latestVersion > currentVersion) {
+                    // Force the update
+                    (context as MainActivity).runOnUiThread {
+                        AlertDialog.Builder(context)
+                            .setTitle("Update Required")
+                            .setMessage("A new version is available and must be installed to continue.")
+                            .setCancelable(false)
+                            .setPositiveButton("Update") { _, _ ->
+                                downloadAndInstall(context, apkUrl)
+                            }
+                            .show()
+                    }
+                }
+            } catch (e: Exception) {
+                println("Update check error: ${e.message}")
+            }
+        }.start()
+    }
+
+    fun downloadAndInstall(context: Context, apkUrl: String) {
+        val request = DownloadManager.Request(Uri.parse(apkUrl))
+        request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "update.apk")
+        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+        request.setMimeType("application/vnd.android.package-archive")
+
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        updateDownloadId = dm.enqueue(request)
+
+        // System installer will take over automatically when user taps
+    }
+
+    private fun handleDownloadedUpdate() {
+        updateDownloadId = -1L
+        val apkFile = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "update.apk")
+        if (!apkFile.exists()) {
+            Toast.makeText(this, "Update download missing.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val devicePolicyManager = CustomDevicePolicyManager.getInstance(this)
+        if (devicePolicyManager.isDeviceOwnerActive()) {
+            installSilently(apkFile)
+        } else {
+            promptManualInstall(apkFile)
+        }
+    }
+
+    private fun installSilently(apkFile: File) {
+        try {
+            val packageInstaller = packageManager.packageInstaller
+            val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+            val sessionId = packageInstaller.createSession(params)
+            packageInstaller.openSession(sessionId).use { session ->
+                apkFile.inputStream().use { input ->
+                    session.openWrite("base.apk", 0, apkFile.length()).use { out ->
+                        input.copyTo(out)
+                        session.fsync(out)
+                    }
+                }
+                val statusIntent = Intent(this, InstallResultReceiver::class.java)
+                val pendingIntent = PendingIntent.getBroadcast(
+                    this,
+                    sessionId,
+                    statusIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                session.commit(pendingIntent.intentSender)
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Silent install failed", e)
+            promptManualInstall(apkFile)
+        }
+    }
+
+    private fun promptManualInstall(apkFile: File) {
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("Install Update")
+                .setMessage("A new version is ready to install.")
+                .setCancelable(false)
+                .setPositiveButton("Install") { _, _ ->
+                    launchManualInstallIntent(apkFile)
+                }
+                .show()
+        }
+    }
+
+    private fun launchManualInstallIntent(apkFile: File) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+            Toast.makeText(this, "Allow installs then tap Install again.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val apkUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apkFile)
+        val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+            data = apkUri
+            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
+            putExtra(Intent.EXTRA_RETURN_RESULT, true)
+        }
+        startActivity(installIntent)
+    }
 
     private fun initWebView() {
         webView.settings.apply {
@@ -231,6 +390,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(updateDownloadReceiver)
+        } catch (e: IllegalArgumentException) {
+            Log.w("MainActivity", "Receiver already unregistered")
+        }
         tts.stop()
         tts.shutdown()
         super.onDestroy()
