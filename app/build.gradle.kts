@@ -12,8 +12,8 @@ android {
         applicationId = "com.talq2me.baerenlock"
         minSdk = 28
         targetSdk = 35
-        versionCode = 14
-        versionName = "14"
+        versionCode = 20
+        versionName = "20"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -26,6 +26,13 @@ android {
                 "proguard-rules.pro"
             )
         }
+    }
+    
+    // Disable lint tasks for release builds to avoid Windows file lock issues
+    // Use afterEvaluate to configure tasks after they're created
+    afterEvaluate {
+        tasks.findByName("lintVitalAnalyzeRelease")?.enabled = false
+        tasks.findByName("lintVitalRelease")?.enabled = false
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
