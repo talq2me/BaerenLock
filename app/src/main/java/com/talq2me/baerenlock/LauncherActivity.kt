@@ -1,6 +1,7 @@
 package com.talq2me.baerenlock
 
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -12,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.InputType
 import android.util.Log
 import android.view.Gravity
@@ -184,6 +186,13 @@ class LauncherActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        
+        // Check if we're the default launcher (check on resume in case user changed it)
+        ensureDefaultLauncher()
+        
+        // Check for updates when coming to foreground (throttled to once per hour)
+        MainActivity.checkForUpdate(this)
+        
         refreshIcons(appGrid)
         updateAccessibilityBanner(appGrid.parent as ViewGroup)
 
@@ -226,6 +235,98 @@ class LauncherActivity : AppCompatActivity() {
         runOnUiThread {
             rewardMinutesTextView?.text = "Reward: $minutes min"
             refreshIcons(appGrid)
+        }
+    }
+
+    private fun ensureDefaultLauncher() {
+        val devicePolicyManager = DevicePolicyManager.getInstance(this)
+        if (devicePolicyManager.isDeviceOwnerActive()) {
+            try {
+                val componentName = ComponentName(this, LauncherActivity::class.java)
+                val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+                val adminComponent = ComponentName(this, DeviceAdminReceiver::class.java)
+                
+                // Set this app as the default launcher (requires device owner)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    dpm.addPersistentPreferredActivity(
+                        adminComponent,
+                        IntentFilter(Intent.ACTION_MAIN).apply {
+                            addCategory(Intent.CATEGORY_HOME)
+                            addCategory(Intent.CATEGORY_DEFAULT)
+                        },
+                        componentName
+                    )
+                    Log.d(TAG, "Set BaerenLock as default launcher (device owner)")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to set default launcher: ${e.message}", e)
+            }
+        } else {
+            // If not device owner, check if we're the default launcher using a more reliable method
+            val isDefaultLauncher = isDefaultLauncher()
+            
+            if (!isDefaultLauncher) {
+                Log.d(TAG, "Not set as default launcher")
+                // Show prompt (but allow it to be shown again if user dismisses and comes back)
+                val prefs = getSharedPreferences("com.talq2me.baerenlock.prefs", Context.MODE_PRIVATE)
+                val lastPromptTime = prefs.getLong("launcher_prompt_last_shown", 0)
+                val currentTime = System.currentTimeMillis()
+                // Show prompt if never shown, or if last shown more than 1 hour ago
+                if (lastPromptTime == 0L || (currentTime - lastPromptTime) > 3600000) {
+                    AlertDialog.Builder(this)
+                        .setTitle("Set BaerenLock as Home")
+                        .setMessage("BaerenLock needs to be set as your default launcher to work properly. When you press the home button, it should open BaerenLock.\n\nPlease go to Settings and select BaerenLock as your Home app.")
+                        .setPositiveButton("Open Settings") { _, _ ->
+                            try {
+                                // Try the direct home settings intent first
+                                val settingsIntent = Intent(Settings.ACTION_HOME_SETTINGS)
+                                startActivity(settingsIntent)
+                            } catch (e: Exception) {
+                                // Fallback to general app settings
+                                try {
+                                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                        data = android.net.Uri.parse("package:$packageName")
+                                    }
+                                    startActivity(intent)
+                                } catch (e2: Exception) {
+                                    Log.e(TAG, "Failed to open settings", e2)
+                                }
+                            }
+                        }
+                        .setNegativeButton("Later", null)
+                        .setCancelable(false)
+                        .show()
+                    prefs.edit().putLong("launcher_prompt_last_shown", currentTime).apply()
+                }
+            } else {
+                Log.d(TAG, "BaerenLock is set as default launcher")
+                // Clear the prompt flag if we're now the default
+                val prefs = getSharedPreferences("com.talq2me.baerenlock.prefs", Context.MODE_PRIVATE)
+                prefs.edit().putLong("launcher_prompt_last_shown", 0).apply()
+            }
+        }
+    }
+    
+    private fun isDefaultLauncher(): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+            }
+            
+            // Resolve the HOME intent to see which launcher is currently default
+            val resolveInfo = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            
+            if (resolveInfo != null) {
+                val defaultPackage = resolveInfo.activityInfo.packageName
+                val isDefault = defaultPackage == packageName
+                Log.d(TAG, "Default launcher check: current=$defaultPackage, ourPackage=$packageName, isDefault=$isDefault")
+                return isDefault
+            }
+            
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking default launcher: ${e.message}", e)
+            false
         }
     }
 
@@ -362,7 +463,16 @@ class LauncherActivity : AppCompatActivity() {
                 scaleType = ImageView.ScaleType.CENTER_INSIDE
                 layoutParams = LinearLayout.LayoutParams(120, 120)
                 setOnClickListener {
-                    packageManager.getLaunchIntentForPackage(ri.activityInfo.packageName)?.let { startActivity(it) }
+                    val pkgName = ri.activityInfo.packageName
+                    // If clicking on BaerenLock itself, force an update check
+                    if (pkgName == packageName) {
+                        Log.d(TAG, "BaerenLock icon clicked - forcing update check")
+                        MainActivity.checkForUpdate(this@LauncherActivity, force = true)
+                    }
+                    // Launch the app normally (or do nothing if it's BaerenLock since we're already in it)
+                    if (pkgName != packageName) {
+                        packageManager.getLaunchIntentForPackage(pkgName)?.let { startActivity(it) }
+                    }
                 }
             }
             val label = TextView(this).apply {

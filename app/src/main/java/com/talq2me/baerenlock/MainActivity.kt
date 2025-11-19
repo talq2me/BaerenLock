@@ -38,6 +38,123 @@ import java.net.URL
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
+    companion object {
+        fun checkForUpdate(context: Context) {
+            checkForUpdate(context, false)
+        }
+        
+        fun checkForUpdate(context: Context, force: Boolean = false) {
+            // Throttle update checks to avoid excessive network requests
+            // Only check once per hour unless forced
+            val prefs = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+            val lastCheckTime = prefs.getLong("last_update_check", 0L)
+            val now = System.currentTimeMillis()
+            val oneHourInMs = 60 * 60 * 1000L
+            
+            if (!force && (now - lastCheckTime) < oneHourInMs) {
+                Log.d("MainActivity", "Skipping update check - last checked ${(now - lastCheckTime) / 1000 / 60} minutes ago")
+                return
+            }
+            
+            // Save the check time
+            prefs.edit().putLong("last_update_check", now).apply()
+            
+            Thread {
+                try {
+                    // Check for internet first
+                    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                    val network = cm.activeNetwork
+                    if (network == null) {
+                        Log.d("MainActivity", "No internet — skipping update check.")
+                        return@Thread
+                    }
+
+                    Log.d("MainActivity", "Checking for updates...")
+                    // Download JSON from GitHub Pages
+                    val jsonText = URL("https://raw.githubusercontent.com/talq2me/BaerenLock/refs/heads/main/release-config/version.json")
+                        .readText()
+
+                    val json = JSONObject(jsonText)
+                    val latestVersion = json.getInt("latestVersionCode")
+                    val apkUrl = json.getString("apkUrl")
+
+                    val currentVersion = context.packageManager
+                        .getPackageInfo(context.packageName, 0).longVersionCode
+
+                    Log.d("MainActivity", "Update check: current=$currentVersion, latest=$latestVersion")
+
+                    if (latestVersion > currentVersion) {
+                        // Force the update
+                        if (context is MainActivity) {
+                            context.runOnUiThread {
+                                AlertDialog.Builder(context)
+                                    .setTitle("Update Required")
+                                    .setMessage("A new version is available and must be installed to continue.")
+                                    .setCancelable(false)
+                                    .setPositiveButton("Update") { _, _ ->
+                                        downloadAndInstall(context, apkUrl)
+                                    }
+                                    .show()
+                            }
+                        } else if (context is LauncherActivity) {
+                            context.runOnUiThread {
+                                AlertDialog.Builder(context)
+                                    .setTitle("Update Required")
+                                    .setMessage("A new version is available and must be installed to continue.")
+                                    .setCancelable(false)
+                                    .setPositiveButton("Update") { _, _ ->
+                                        // Download and install the update
+                                        downloadAndInstall(context, apkUrl)
+                                    }
+                                    .show()
+                            }
+                        } else {
+                            // Generic context - try to show dialog if it's an Activity
+                            if (context is android.app.Activity) {
+                                context.runOnUiThread {
+                                    AlertDialog.Builder(context)
+                                        .setTitle("Update Required")
+                                        .setMessage("A new version is available and must be installed to continue.")
+                                        .setCancelable(false)
+                                        .setPositiveButton("Update") { _, _ ->
+                                            downloadAndInstall(context, apkUrl)
+                                        }
+                                        .show()
+                                }
+                            }
+                        }
+                    } else {
+                        Log.d("MainActivity", "App is up to date")
+                    }
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Update check error: ${e.message}", e)
+                }
+            }.start()
+        }
+
+        fun downloadAndInstall(context: Context, apkUrl: String) {
+            val request = DownloadManager.Request(Uri.parse(apkUrl))
+            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "update.apk")
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            request.setMimeType("application/vnd.android.package-archive")
+
+            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            val downloadId = dm.enqueue(request)
+            
+            // If called from MainActivity, store the ID for the receiver
+            if (context is MainActivity) {
+                (context as MainActivity).updateDownloadId = downloadId
+            } else {
+                // Store in SharedPreferences so MainActivity can pick it up if it's running
+                val prefs = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+                prefs.edit().putLong("update_download_id", downloadId).apply()
+            }
+
+            // System installer will take over automatically when user taps the notification
+            Log.d("MainActivity", "Update download started: ID=$downloadId")
+        }
+    }
+
     private lateinit var webView: WebView
     private lateinit var tts: TextToSpeech
     private var rewardAppDialog: AlertDialog? = null
@@ -45,7 +162,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private val updateDownloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) ?: return
-            if (id == updateDownloadId && updateDownloadId != -1L) {
+            
+            // Check if this matches our tracked download ID or one from SharedPreferences
+            val prefs = getSharedPreferences("update_prefs", MODE_PRIVATE)
+            val savedDownloadId = prefs.getLong("update_download_id", -1L)
+            
+            if ((id == updateDownloadId && updateDownloadId != -1L) || 
+                (id == savedDownloadId && savedDownloadId != -1L)) {
+                // Clear the saved ID
+                prefs.edit().remove("update_download_id").apply()
+                updateDownloadId = id
                 handleDownloadedUpdate()
             }
         }
@@ -117,59 +243,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             @Suppress("DEPRECATION")
             registerReceiver(updateDownloadReceiver, filter)
         }
-    }
-
-    fun checkForUpdate(context: Context) {
-        Thread {
-            try {
-                // Check for internet first
-                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-                val network = cm.activeNetwork
-                if (network == null) {
-                    println("No internet — skipping update check.")
-                    return@Thread
-                }
-
-                // Download JSON from GitHub Pages
-                val jsonText = URL("https://talq2me.github.io/BaerenLock/app/release/version.json")
-                    .readText()
-
-                val json = JSONObject(jsonText)
-                val latestVersion = json.getInt("latestVersionCode")
-                val apkUrl = json.getString("apkUrl")
-
-                val currentVersion = context.packageManager
-                    .getPackageInfo(context.packageName, 0).longVersionCode
-
-                if (latestVersion > currentVersion) {
-                    // Force the update
-                    (context as MainActivity).runOnUiThread {
-                        AlertDialog.Builder(context)
-                            .setTitle("Update Required")
-                            .setMessage("A new version is available and must be installed to continue.")
-                            .setCancelable(false)
-                            .setPositiveButton("Update") { _, _ ->
-                                downloadAndInstall(context, apkUrl)
-                            }
-                            .show()
-                    }
-                }
-            } catch (e: Exception) {
-                println("Update check error: ${e.message}")
-            }
-        }.start()
-    }
-
-    fun downloadAndInstall(context: Context, apkUrl: String) {
-        val request = DownloadManager.Request(Uri.parse(apkUrl))
-        request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "update.apk")
-        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        request.setMimeType("application/vnd.android.package-archive")
-
-        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        updateDownloadId = dm.enqueue(request)
-
-        // System installer will take over automatically when user taps
     }
 
     private fun handleDownloadedUpdate() {
@@ -387,6 +460,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         } catch (e: Exception) {
             Log.e("MainActivity", "Error cleaning up background apps", e)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Check for updates when coming to foreground (throttled to once per hour)
+        checkForUpdate(this)
     }
 
     override fun onDestroy() {

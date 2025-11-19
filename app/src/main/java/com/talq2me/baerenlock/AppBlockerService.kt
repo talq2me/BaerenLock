@@ -75,10 +75,13 @@ class AppBlockerService : AccessibilityService() {
 
         val pkgName = event.packageName?.toString() ?: return
 
+        // Update RewardManager with the current foreground app (for accurate reward time counting)
+        RewardManager.updateForegroundApp(pkgName)
+        lastPackage = pkgName
+
         // Only block if it's a reward-eligible app and reward minutes are 0
         if (RewardManager.rewardEligibleApps.contains(pkgName) && RewardManager.currentRewardMinutes <= 0) {
             Log.d("AppBlocker", "🚫 BLOCKING expired reward app: $pkgName - returning to launcher")
-            lastPackage = pkgName
 
             // Use device owner capabilities if available for stronger blocking
             if (devicePolicyManager.isDeviceOwnerActive()) {
@@ -153,6 +156,9 @@ class AppBlockerService : AccessibilityService() {
                     if (process.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
                         val pkgName = process.processName
                         Log.d("AppBlocker", "Foreground process: $pkgName")
+
+                        // Update RewardManager with the current foreground app (for accurate reward time counting)
+                        RewardManager.updateForegroundApp(pkgName)
 
                         // Only block if it's a reward-eligible app and reward minutes are 0
                         if (RewardManager.rewardEligibleApps.contains(pkgName) && RewardManager.currentRewardMinutes <= 0) {
@@ -236,6 +242,9 @@ class AppBlockerService : AccessibilityService() {
                 return
             }
             Log.d("AppBlocker", "USAGESTATS: Last foreground app: $pkgName")
+            
+            // Update RewardManager with the current foreground app (for accurate reward time counting)
+            RewardManager.updateForegroundApp(pkgName)
             
             // Only block if it's a reward-eligible app and reward minutes are 0
             if (RewardManager.rewardEligibleApps.contains(pkgName) && RewardManager.currentRewardMinutes <= 0) {

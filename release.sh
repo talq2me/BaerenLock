@@ -5,9 +5,9 @@ set -e
 KEYSTORE_PATH="C:/Users/talqu/keystore1"   # your keystore
 KEY_ALIAS="key1"
 
-VERSION_JSON="app/release/version.json"
+VERSION_JSON="release-config/version.json"  # Safe from clean builds
 GRADLE_FILE="app/build.gradle.kts"
-APK_SOURCE="app/release/app-release.apk"
+APK_SOURCE="app/build/outputs/apk/release/app-release.apk"
 
 # This is the folder inside THE SAME repo that is served by GitHub Pages
 PAGES_APK_PATH="app/release/app-release.apk"
@@ -36,7 +36,9 @@ sed -i "s/\"latestVersionCode\":.*/\"latestVersionCode\": $NEW_VERSION,/" "$VERS
 ### --- BUILD SIGNED APK --- ###
 echo "Building signed APK..."
 
-./gradlew clean assembleRelease -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
+# Skip clean and lint on Windows to avoid file lock issues - assembleRelease will rebuild what's needed
+./gradlew assembleRelease -x lintVitalAnalyzeRelease -x lintVitalRelease \
+  -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
   -Pandroid.injected.signing.store.password="$STOREPASS" \
   -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
   -Pandroid.injected.signing.key.password="$STOREPASS"
@@ -44,7 +46,7 @@ echo "Building signed APK..."
 echo "APK built."
 
 ### --- COPY APK TO GITHUB PAGES FOLDER --- ###
-#cp "$APK_SOURCE" "$PAGES_APK_PATH"
+cp "$APK_SOURCE" "$PAGES_APK_PATH"
 
 ### --- GIT COMMIT + TAG + PUSH --- ###
 git add .

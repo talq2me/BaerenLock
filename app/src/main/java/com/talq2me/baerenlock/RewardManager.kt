@@ -12,6 +12,9 @@ import android.app.ActivityManager
 import android.content.pm.PackageManager
 import android.content.ComponentName
 import com.talq2me.baerenlock.LauncherActivity
+import java.util.Calendar
+import android.os.Build
+import android.app.AppOpsManager
 
 object RewardManager {
 
@@ -308,21 +311,164 @@ object RewardManager {
 
     fun saveRewardMinutes(context: Context) {
         val prefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
-        prefs.edit().putInt("current_reward_minutes", currentRewardMinutes).apply()
-        Log.d("RewardManager", "Saved reward minutes to SharedPreferences: $currentRewardMinutes")
+        val editor = prefs.edit()
+        editor.putInt("current_reward_minutes", currentRewardMinutes)
+        // Save today's date to track daily reset
+        val today = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        editor.putLong("last_reward_date", today)
+        editor.apply()
+        Log.d("RewardManager", "Saved reward minutes to SharedPreferences: $currentRewardMinutes, date: $today")
     }
 
     fun loadRewardMinutes(context: Context) {
         val prefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
-        currentRewardMinutes = prefs.getInt("current_reward_minutes", 0)
-        Log.d("RewardManager", "Loaded reward minutes from SharedPreferences: $currentRewardMinutes")
+        
+        // Check if we need to reset for a new day
+        val today = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        
+        val lastRewardDate = prefs.getLong("last_reward_date", 0L)
+        
+        if (lastRewardDate != today && lastRewardDate != 0L) {
+            // It's a new day - reset reward minutes to 0
+            Log.d("RewardManager", "New day detected (last: $lastRewardDate, today: $today). Resetting reward minutes to 0.")
+            currentRewardMinutes = 0
+            saveRewardMinutes(context) // This will also update the date
+        } else {
+            // Same day - load the saved minutes
+            currentRewardMinutes = prefs.getInt("current_reward_minutes", 0)
+            Log.d("RewardManager", "Loaded reward minutes from SharedPreferences: $currentRewardMinutes (same day)")
+        }
+        
         if (currentRewardMinutes > 0) {
             startRewardTimer(context)
         }
     }
 
+    // Track the last known foreground app (updated by AppBlockerService or our own checks)
+    private var lastKnownForegroundApp: String? = null
+    private var lastForegroundAppUpdateTime: Long = 0
+    
+    /**
+     * Updates the last known foreground app. Can be called by AppBlockerService or internally.
+     */
+    fun updateForegroundApp(packageName: String?) {
+        if (packageName != null) {
+            lastKnownForegroundApp = packageName
+            lastForegroundAppUpdateTime = System.currentTimeMillis()
+            Log.d("RewardManager", "Updated last known foreground app: $packageName")
+        }
+    }
+    
+    /**
+     * Checks if UsageStats permission is granted.
+     */
+    private fun hasUsageStatsPermission(context: Context): Boolean {
+        return try {
+            val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOps.unsafeCheckOpNoThrow("android:get_usage_stats", android.os.Process.myUid(), context.packageName)
+            } else {
+                @Suppress("DEPRECATION")
+                appOps.checkOpNoThrow(
+                    "android:get_usage_stats",
+                    android.os.Process.myUid(),
+                    context.packageName
+                )
+            }
+            mode == AppOpsManager.MODE_ALLOWED
+        } catch (e: Exception) {
+            Log.w("RewardManager", "Error checking UsageStats permission: ${e.message}")
+            false
+        }
+    }
+    
+    /**
+     * Checks if a reward-eligible app is currently in the foreground.
+     * Uses multiple methods with fallbacks for reliability.
+     */
+    private fun isRewardAppInForeground(context: Context): Boolean {
+        // Method 1: Check last known foreground app (updated by AppBlockerService or previous checks)
+        // Use it if it was updated recently (within last 5 seconds)
+        val now = System.currentTimeMillis()
+        if (lastKnownForegroundApp != null && (now - lastForegroundAppUpdateTime) < 5000) {
+            if (rewardEligibleApps.contains(lastKnownForegroundApp)) {
+                Log.d("RewardManager", "Reward app is in foreground (from cached state): $lastKnownForegroundApp")
+                return true
+            }
+        }
+        
+        // Method 2: Try UsageStatsManager (requires permission)
+        if (hasUsageStatsPermission(context)) {
+            try {
+                val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+                val time = System.currentTimeMillis()
+                val usageEvents = usm.queryEvents(time - 10000, time) // Last 10 seconds
+                val event = android.app.usage.UsageEvents.Event()
+                
+                var lastForegroundApp: String? = null
+                while (usageEvents.hasNextEvent()) {
+                    usageEvents.getNextEvent(event)
+                    if (event.eventType == android.app.usage.UsageEvents.Event.ACTIVITY_RESUMED) {
+                        lastForegroundApp = event.packageName
+                    }
+                }
+                
+                // Update our cached state
+                if (lastForegroundApp != null) {
+                    updateForegroundApp(lastForegroundApp)
+                }
+                
+                // Check if the foreground app is a reward-eligible app
+                if (lastForegroundApp != null && rewardEligibleApps.contains(lastForegroundApp)) {
+                    Log.d("RewardManager", "Reward app is in foreground (via UsageStats): $lastForegroundApp")
+                    return true
+                }
+            } catch (e: Exception) {
+                Log.w("RewardManager", "Error using UsageStatsManager: ${e.message}")
+            }
+        } else {
+            Log.w("RewardManager", "UsageStats permission not granted - cannot reliably detect foreground apps")
+        }
+        
+        // Method 3: Fallback to ActivityManager (less reliable but doesn't require special permission)
+        try {
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val runningProcesses = am.runningAppProcesses
+            if (runningProcesses != null) {
+                for (process in runningProcesses) {
+                    if (process.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
+                        val pkgName = process.processName
+                        // Update our cached state
+                        updateForegroundApp(pkgName)
+                        
+                        if (rewardEligibleApps.contains(pkgName)) {
+                            Log.d("RewardManager", "Reward app is in foreground (via ActivityManager): $pkgName")
+                            return true
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("RewardManager", "Error checking foreground app via ActivityManager: ${e.message}")
+        }
+        
+        Log.d("RewardManager", "No reward app detected in foreground")
+        return false
+    }
+
     /**
      * Starts the reward timer to decrement minutes and update storage.
+     * Only decrements when a reward-eligible app is actually in the foreground.
      */
     fun startRewardTimer(context: Context) {
         Log.d("RewardManager", "startRewardTimer called. Current minutes: $currentRewardMinutes")
@@ -334,10 +480,15 @@ object RewardManager {
         rewardRunnable = object : Runnable {
             override fun run() {
                 if (currentRewardMinutes > 0) {
-                    currentRewardMinutes -= 1 // Decrement every minute
-                    if (currentRewardMinutes < 0) currentRewardMinutes = 0
-                    saveRewardMinutes(context)
-                    Log.d("RewardManager", "Reward minutes decremented to: $currentRewardMinutes. Rescheduling timer.")
+                    // Only decrement if a reward app is actually in the foreground
+                    if (isRewardAppInForeground(context)) {
+                        currentRewardMinutes -= 1 // Decrement every minute
+                        if (currentRewardMinutes < 0) currentRewardMinutes = 0
+                        saveRewardMinutes(context)
+                        Log.d("RewardManager", "Reward app in foreground - minutes decremented to: $currentRewardMinutes")
+                    } else {
+                        Log.d("RewardManager", "No reward app in foreground - skipping decrement (minutes: $currentRewardMinutes)")
+                    }
 
                     if (currentRewardMinutes == 0) {
                         // Reward time is up, remove temporary apps
@@ -368,7 +519,7 @@ object RewardManager {
                         Log.d("RewardManager", "Reward timer stopped as minutes reached 0.")
 
                     } else {
-                        // Schedule next decrement for 1 minute
+                        // Schedule next check for 1 minute (always check every minute, but only decrement if in foreground)
                         rewardTimer?.postDelayed(this, 1 * 60 * 1000L)
                     }
                 } else {
