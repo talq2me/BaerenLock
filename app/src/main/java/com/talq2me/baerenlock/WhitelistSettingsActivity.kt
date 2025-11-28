@@ -85,8 +85,13 @@ class WhitelistSettingsActivity : AppCompatActivity() {
             
             Log.d("WhitelistSettings", "Adding app: $appName ($pkg)")
             
+            val isSystem = isSystemApp(pkg)
             val cb = CheckBox(this).apply {
-                text = "$appName ($pkg)"
+                text = if (isSystem && allowed.contains(pkg)) {
+                    "⚠️ SYSTEM: $appName ($pkg)"
+                } else {
+                    "$appName ($pkg)"
+                }
                 isChecked = allowed.contains(pkg)
                 setOnCheckedChangeListener { _, isChecked ->
                     if (isChecked) {
@@ -96,9 +101,15 @@ class WhitelistSettingsActivity : AppCompatActivity() {
                         RewardManager.removeFromWhitelist(pkg, this@WhitelistSettingsActivity)
                         Log.d("WhitelistSettings", "Removed from whitelist: $pkg")
                     }
-                    // Update the header count
+                    // Update the header count and refresh text if it's a system app
                     val newCount = allApps.count { ri -> allowed.contains(ri.applicationInfo.packageName) }
                     header.text = "Found ${allApps.size} apps. Currently whitelisted: $newCount"
+                    // Update checkbox text to show/hide system indicator
+                    text = if (isSystem && isChecked) {
+                        "⚠️ SYSTEM: $appName ($pkg)"
+                    } else {
+                        "$appName ($pkg)"
+                    }
                 }
             }
             layout.addView(cb)
@@ -109,6 +120,34 @@ class WhitelistSettingsActivity : AppCompatActivity() {
         }
 
         setContentView(scroll)
+    }
+
+    private fun isSystemApp(pkgName: String): Boolean {
+        // Match the same list as AppBlockerService.shouldBlockApp()
+        return pkgName.startsWith("com.android.systemui") ||
+               pkgName.startsWith("com.android.launcher") ||
+               pkgName.startsWith("com.google.android.apps.nexuslauncher") ||
+               pkgName.startsWith("com.google.android.launcher") ||
+               pkgName.startsWith("com.android.phone") ||
+               pkgName == "com.android.settings" ||
+               pkgName.startsWith("com.android.providers.") ||
+               pkgName.startsWith("com.android.packageinstaller") ||
+               pkgName.startsWith("com.google.android.packageinstaller") ||
+               pkgName.startsWith("com.google.android.inputmethod") ||
+               pkgName.startsWith("com.android.inputmethod") ||
+               pkgName.startsWith("com.samsung.inputmethod") ||
+               pkgName.startsWith("com.google.android.apps.inputmethod") ||
+               pkgName.startsWith("com.google.android.gms") ||
+               pkgName.startsWith("com.google.android.gsf") ||
+               pkgName.startsWith("com.google.android.setupwizard") ||
+               pkgName.startsWith("com.android.permissioncontroller") ||
+               pkgName.startsWith("com.google.android.permissioncontroller") ||
+               pkgName == "android" ||
+               pkgName == "com.android.server.telecom" ||
+               pkgName == "com.android.dialer" ||
+               pkgName.startsWith("com.android.emergency") ||
+               pkgName.startsWith("com.android.certinstaller") ||
+               pkgName.startsWith("com.google.android.certinstaller")
     }
 
     override fun onPause() {

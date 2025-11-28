@@ -95,11 +95,26 @@ object RewardManager {
     fun addToWhitelist(pkg: String, context: Context) {
         allowedApps.add(pkg)
         saveAllowedApps(context)
+        // Automatically remove from blacklist when whitelisted
+        removeFromBlacklist(pkg, context)
     }
 
     fun removeFromWhitelist(pkg: String, context: Context) {
         allowedApps.remove(pkg)
         saveAllowedApps(context)
+    }
+
+    private fun removeFromBlacklist(pkg: String, context: Context) {
+        try {
+            val prefs = context.getSharedPreferences("blacklist_prefs", Context.MODE_PRIVATE)
+            val blacklist = prefs.getStringSet("packages", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
+            if (blacklist.remove(pkg)) {
+                prefs.edit().putStringSet("packages", blacklist).apply()
+                Log.d("RewardManager", "Removed $pkg from blacklist (added to whitelist)")
+            }
+        } catch (e: Exception) {
+            Log.e("RewardManager", "Error removing from blacklist", e)
+        }
     }
 
     fun saveAllowedApps(context: Context) {
@@ -304,8 +319,17 @@ object RewardManager {
     fun refreshRewardEligibleApps(context: Context) {
         val rewardPrefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
         val savedRewardApps = rewardPrefs.getStringSet("reward_apps", emptySet()) ?: emptySet()
+        val oldRewardApps = rewardEligibleApps.toSet()
         rewardEligibleApps.clear()
         rewardEligibleApps.addAll(savedRewardApps)
+        
+        // Remove newly added reward apps from blacklist
+        savedRewardApps.forEach { pkg ->
+            if (!oldRewardApps.contains(pkg)) {
+                removeFromBlacklist(pkg, context)
+            }
+        }
+        
         Log.d("RewardManager", "Refreshed reward eligible apps: $rewardEligibleApps")
     }
 

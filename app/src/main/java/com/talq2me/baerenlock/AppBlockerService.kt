@@ -19,6 +19,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.graphics.Color
 import android.os.HandlerThread
+import android.os.Looper
+import android.widget.Toast
 
 class AppBlockerService : AccessibilityService() {
 
@@ -48,6 +50,8 @@ class AppBlockerService : AccessibilityService() {
 
     private lateinit var devicePolicyManager: com.talq2me.baerenlock.DevicePolicyManager
     private var blockedPackages = mutableSetOf<String>()
+    private var chromeJeLisUrl: String? = null // Track if Chrome is viewing JeLis
+    private var chromeLaunchedFromBaerenEd: Boolean = false // Track if Chrome was launched from BaerenEd
 
     private val CHANNEL_ID = "AppBlockerServiceChannel"
     private val NOTIFICATION_ID = 1
@@ -75,13 +79,34 @@ class AppBlockerService : AccessibilityService() {
 
         val pkgName = event.packageName?.toString() ?: return
 
+        // Check if Chrome is being launched - if so, check if it came from BaerenEd
+        if (pkgName == "com.android.chrome" || pkgName.contains("chrome", ignoreCase = true)) {
+            // Check if Chrome was launched from BaerenEd (check lastPackage BEFORE updating it)
+            if (lastPackage == "com.talq2me.baerened" || lastPackage == packageName) {
+                chromeLaunchedFromBaerenEd = true
+                Log.d("AppBlocker", "Chrome launched from BaerenEd - allowing for JeLis")
+                // Set a timeout - if Chrome stays open, we'll keep checking for JeLis content
+                Handler(Looper.getMainLooper()).postDelayed({
+                    chromeLaunchedFromBaerenEd = false
+                }, 30000) // Allow for 30 seconds after launch
+            }
+            // Also check Chrome content for JeLis
+            checkChromeUrl(event)
+        }
+
         // Update RewardManager with the current foreground app (for accurate reward time counting)
         RewardManager.updateForegroundApp(pkgName)
         lastPackage = pkgName
 
-        // Only block if it's a reward-eligible app and reward minutes are 0
-        if (RewardManager.rewardEligibleApps.contains(pkgName) && RewardManager.currentRewardMinutes <= 0) {
-            Log.d("AppBlocker", "🚫 BLOCKING expired reward app: $pkgName - returning to launcher")
+        // Check if this app should be blocked
+        if (shouldBlockApp(pkgName)) {
+            Log.d("AppBlocker", "🚫 BLOCKING app: $pkgName - returning to launcher")
+            Log.d("AppBlocker", "Blocking reason: blacklist=${getBlacklist().contains(pkgName)}, rewardApp=${RewardManager.rewardEligibleApps.contains(pkgName)}, rewardMinutes=${RewardManager.currentRewardMinutes}")
+            
+            // Show toast with package name
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(this, "Blocked: $pkgName", Toast.LENGTH_SHORT).show()
+            }
 
             // Use device owner capabilities if available for stronger blocking
             if (devicePolicyManager.isDeviceOwnerActive()) {
@@ -89,11 +114,13 @@ class AppBlockerService : AccessibilityService() {
                 devicePolicyManager.disableApp(pkgName)
             }
 
+            // Don't automatically add to blacklist - only add when user explicitly blacklists
+
             returnToLauncher()
             return
         }
 
-        // For all other apps (system, non-reward, or reward with time remaining), do nothing.
+        // App is allowed, do nothing
         return
     }
 
@@ -160,9 +187,15 @@ class AppBlockerService : AccessibilityService() {
                         // Update RewardManager with the current foreground app (for accurate reward time counting)
                         RewardManager.updateForegroundApp(pkgName)
 
-                        // Only block if it's a reward-eligible app and reward minutes are 0
-                        if (RewardManager.rewardEligibleApps.contains(pkgName) && RewardManager.currentRewardMinutes <= 0) {
-                            Log.d("AppBlocker", "🚫 PERIODIC CHECK - BLOCKING expired reward app: $pkgName - returning to launcher")
+                        // Check if this app should be blocked
+                        if (shouldBlockApp(pkgName)) {
+                            Log.d("AppBlocker", "🚫 PERIODIC CHECK - BLOCKING app: $pkgName - returning to launcher")
+                            Log.d("AppBlocker", "Blocking reason: blacklist=${getBlacklist().contains(pkgName)}, rewardApp=${RewardManager.rewardEligibleApps.contains(pkgName)}, rewardMinutes=${RewardManager.currentRewardMinutes}")
+                            
+                            // Show toast with package name
+                            Handler(Looper.getMainLooper()).post {
+                                Toast.makeText(this@AppBlockerService, "Blocked: $pkgName", Toast.LENGTH_SHORT).show()
+                            }
 
                             // Use device owner capabilities if available for stronger blocking
                             if (devicePolicyManager.isDeviceOwnerActive()) {
@@ -170,10 +203,11 @@ class AppBlockerService : AccessibilityService() {
                                 devicePolicyManager.disableApp(pkgName)
                             }
 
+                            // Don't automatically add to blacklist - only add when user explicitly blacklists
                             returnToLauncher()
                             return
                         }
-                        // For all other apps, do nothing
+                        // App is allowed, continue checking
                         return
                     }
                 }
@@ -186,15 +220,165 @@ class AppBlockerService : AccessibilityService() {
         }
     }
 
+    /**
+     * Checks if Chrome is currently viewing a JeLis URL by examining accessibility event content.
+     */
+    private fun checkChromeUrl(event: AccessibilityEvent) {
+        try {
+            // Try to get URL from window content
+            val source = event.source
+            if (source != null) {
+                // Search for "jelis" or "je lis" in the content
+                val urlNodes = source.findAccessibilityNodeInfosByText("jelis")
+                if (urlNodes.isEmpty()) {
+                    source.findAccessibilityNodeInfosByText("je lis")
+                }
+                if (urlNodes.isNotEmpty()) {
+                    chromeJeLisUrl = "jelis_detected"
+                    Log.d("AppBlocker", "Chrome is viewing JeLis (found in nodes) - allowing access")
+                    return
+                }
+                
+                // Also check the window title/content for JeLis indicators
+                val windowText = source.text?.toString() ?: ""
+                val contentDescription = source.contentDescription?.toString() ?: ""
+                val combinedText = (windowText + " " + contentDescription).lowercase()
+                
+                if (combinedText.contains("jelis") || combinedText.contains("je lis")) {
+                    chromeJeLisUrl = "jelis_detected"
+                    Log.d("AppBlocker", "Chrome is viewing JeLis (detected in text) - allowing access")
+                    return
+                }
+                
+                // Check URL bar - look for common JeLis URL patterns
+                val urlBarNodes = source.findAccessibilityNodeInfosByViewId("com.android.chrome:id/url_bar")
+                urlBarNodes.forEach { node ->
+                    val urlText = node.text?.toString()?.lowercase() ?: ""
+                    if (urlText.contains("jelis") || urlText.contains("je-lis") || urlText.contains("je_lis")) {
+                        chromeJeLisUrl = "jelis_detected"
+                        Log.d("AppBlocker", "Chrome URL bar contains JeLis - allowing access")
+                        return
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("AppBlocker", "Error checking Chrome URL: ${e.message}")
+        }
+    }
+
+    /**
+     * Determines if an app should be blocked.
+     * Simple opt-in blocking model:
+     * - Block if explicitly in blacklist (except Chrome for JeLis)
+     * - Block if reward app with 0 minutes
+     * - Otherwise allow (everything else is allowed if you can get to it)
+     */
+    private fun shouldBlockApp(pkgName: String): Boolean {
+        // Never block our own app
+        if (pkgName == packageName) {
+            Log.d("AppBlocker", "Not blocking our own app: $pkgName")
+            return false
+        }
+
+        // Get the blacklist
+        val blacklist = getBlacklist()
+        Log.d("AppBlocker", "Checking if should block: $pkgName")
+        Log.d("AppBlocker", "Blacklist size: ${blacklist.size}, contains $pkgName: ${blacklist.contains(pkgName)}")
+        if (blacklist.isNotEmpty()) {
+            Log.d("AppBlocker", "Blacklist contents: ${blacklist.joinToString(", ")}")
+        }
+
+        // Check if app is in blacklist
+        if (blacklist.contains(pkgName)) {
+            // Special case: Chrome - allow if viewing JeLis or launched from BaerenEd
+            if (pkgName == "com.android.chrome" || pkgName == "com.chrome.browser" || pkgName.contains("chrome", ignoreCase = true)) {
+                if (chromeJeLisUrl != null || chromeLaunchedFromBaerenEd) {
+                    Log.d("AppBlocker", "Chrome in blacklist but viewing JeLis - allowing: $pkgName")
+                    return false
+                }
+            }
+            Log.d("AppBlocker", "App in blacklist, blocking: $pkgName")
+            return true
+        }
+
+        // Block if it's a reward-eligible app with 0 minutes (expired reward)
+        val isRewardApp = RewardManager.rewardEligibleApps.contains(pkgName)
+        val hasRewardMinutes = RewardManager.currentRewardMinutes > 0
+        if (isRewardApp && !hasRewardMinutes) {
+            Log.d("AppBlocker", "Reward app with 0 minutes, blocking: $pkgName")
+            return true
+        }
+
+        // Everything else is allowed (not blocked)
+        Log.d("AppBlocker", "App not blocked (not in blacklist, not expired reward app): $pkgName")
+        return false
+    }
+
+    private fun addToBlacklist(pkgName: String) {
+        try {
+            val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
+            val blacklist = prefs.getStringSet("packages", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
+            if (blacklist.add(pkgName)) {
+                prefs.edit().putStringSet("packages", blacklist).apply()
+                Log.d("AppBlocker", "Added $pkgName to blacklist")
+            }
+        } catch (e: Exception) {
+            Log.e("AppBlocker", "Error adding to blacklist", e)
+        }
+    }
+
+    fun getBlacklist(): Set<String> {
+        return try {
+            val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
+            prefs.getStringSet("packages", emptySet()) ?: emptySet()
+        } catch (e: Exception) {
+            Log.e("AppBlocker", "Error getting blacklist", e)
+            emptySet()
+        }
+    }
+
+    fun removeFromBlacklist(pkgName: String) {
+        try {
+            val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
+            val blacklist = prefs.getStringSet("packages", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
+            if (blacklist.remove(pkgName)) {
+                prefs.edit().putStringSet("packages", blacklist).apply()
+                Log.d("AppBlocker", "Removed $pkgName from blacklist")
+            }
+        } catch (e: Exception) {
+            Log.e("AppBlocker", "Error removing from blacklist", e)
+        }
+    }
+
     private fun returnToLauncher() {
         Log.d("AppBlocker", "Returning to launcher...")
-        val intent = Intent(this, LauncherActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_CLEAR_TASK or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        try {
+            // First, try to go home using the HOME intent (most reliable)
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            startActivity(homeIntent)
+            
+            // Also try to start our launcher directly as backup
+            Handler(Looper.getMainLooper()).postDelayed({
+                try {
+                    val launcherIntent = Intent(this, LauncherActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    }
+                    startActivity(launcherIntent)
+                } catch (e: Exception) {
+                    Log.e("AppBlocker", "Failed to start launcher directly: ${e.message}", e)
+                }
+            }, 100)
+        } catch (e: Exception) {
+            Log.e("AppBlocker", "Failed to return to launcher: ${e.message}", e)
         }
-        startActivity(intent)
     }
 
     private fun hasUsageStatsPermission(): Boolean {
@@ -246,9 +430,15 @@ class AppBlockerService : AccessibilityService() {
             // Update RewardManager with the current foreground app (for accurate reward time counting)
             RewardManager.updateForegroundApp(pkgName)
             
-            // Only block if it's a reward-eligible app and reward minutes are 0
-            if (RewardManager.rewardEligibleApps.contains(pkgName) && RewardManager.currentRewardMinutes <= 0) {
-                Log.d("AppBlocker", "USAGESTATS - BLOCKING expired reward app: $pkgName - returning to launcher")
+            // Check if this app should be blocked
+            if (shouldBlockApp(pkgName)) {
+                Log.d("AppBlocker", "USAGESTATS - BLOCKING app: $pkgName - returning to launcher")
+                Log.d("AppBlocker", "Blocking reason: blacklist=${getBlacklist().contains(pkgName)}, rewardApp=${RewardManager.rewardEligibleApps.contains(pkgName)}, rewardMinutes=${RewardManager.currentRewardMinutes}")
+                
+                // Show toast with package name
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(this@AppBlockerService, "Blocked: $pkgName", Toast.LENGTH_SHORT).show()
+                }
 
                 // Use device owner capabilities if available for stronger blocking
                 if (devicePolicyManager.isDeviceOwnerActive()) {
@@ -256,10 +446,11 @@ class AppBlockerService : AccessibilityService() {
                     devicePolicyManager.disableApp(pkgName)
                 }
 
+                // Don't automatically add to blacklist - only add when user explicitly blacklists
                 returnToLauncher()
                 return
             }
-            // For all other apps, do nothing
+            // App is allowed, do nothing
             return
         } catch (e: Exception) {
             Log.e("AppBlocker", "USAGESTATS: Error in checkUsageStats", e)

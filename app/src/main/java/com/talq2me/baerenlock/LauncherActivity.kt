@@ -34,6 +34,7 @@ class LauncherActivity : AppCompatActivity() {
     private var accessibilityBanner: Button? = null
     private lateinit var prefs: SharedPreferences
     private var rewardMinutesTextView: TextView? = null
+    private var backgroundImageView: ImageView? = null
 
     companion object {
         private const val TAG = "LauncherActivity"
@@ -56,7 +57,7 @@ class LauncherActivity : AppCompatActivity() {
 
         val userProfile = readProfile()
 
-        val background = createDailyBackgroundImageView(userProfile)
+        backgroundImageView = createDailyBackgroundImageView(userProfile)
 
         val contentLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -64,7 +65,7 @@ class LauncherActivity : AppCompatActivity() {
         }
 
         val root = FrameLayout(this).apply {
-            addView(background)
+            addView(backgroundImageView)
             addView(contentLayout)
         }
 
@@ -192,6 +193,9 @@ class LauncherActivity : AppCompatActivity() {
         
         // Check for updates when coming to foreground (throttled to once per hour)
         MainActivity.checkForUpdate(this)
+        
+        // Refresh background image in case it was cleared from memory
+        refreshBackgroundImage()
         
         refreshIcons(appGrid)
         updateAccessibilityBanner(appGrid.parent as ViewGroup)
@@ -516,16 +520,17 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun showSettingsMenu() {
-        val options = arrayOf("App Whitelist", "Reward Apps", "Change PIN", "Change Profile", "Change Parent Email")
+        val options = arrayOf("App Whitelist", "Reward Apps", "Blocked Apps", "Change PIN", "Change Profile", "Change Parent Email")
         AlertDialog.Builder(this)
             .setTitle("Settings")
             .setItems(options) { _, which ->
                 when (which) {
                     0 -> startActivity(Intent(this, WhitelistSettingsActivity::class.java))
                     1 -> startActivity(Intent(this, RewardAppsSettingsActivity::class.java))
-                    2 -> showChangePinDialog()
-                    3 -> showChangeProfileDialog()
-                    4 -> showChangeEmailDialog()
+                    2 -> startActivity(Intent(this, BlackListSettingsActivity::class.java))
+                    3 -> showChangePinDialog()
+                    4 -> showChangeProfileDialog()
+                    5 -> showChangeEmailDialog()
                 }
             }
             .show()
@@ -617,23 +622,97 @@ class LauncherActivity : AppCompatActivity() {
         return ImageView(this).apply {
             layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
             scaleType = ImageView.ScaleType.CENTER_CROP
+            // Set dark grey as fallback background color (will show if image fails to load)
+            setBackgroundColor(Color.parseColor("#2D2D2D")) // Dark grey
 
             if (userProfile == null) {
-                setBackgroundColor(Color.GRAY)
+                setBackgroundColor(Color.parseColor("#2D2D2D"))
                 return@apply
             }
 
             val prefix = if (userProfile == "A") "bg_a_" else "bg_b_"
             val fields = R.drawable::class.java.fields
-            val drawables = fields.filter { it.name.startsWith(prefix) }
+            // Only use the _orig.jpg files, not the XML files
+            val drawables = fields.filter { 
+                it.name.startsWith(prefix) && it.name.endsWith("_orig")
+            }
 
             if (drawables.isNotEmpty()) {
-                val randomDrawableId = drawables.random().getInt(null)
-                setImageResource(randomDrawableId)
+                try {
+                    val randomDrawableId = drawables.random().getInt(null)
+                    setImageResource(randomDrawableId)
+                    Log.d(TAG, "Set background image: ${drawables.find { it.getInt(null) == randomDrawableId }?.name}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to set background image: ${e.message}", e)
+                    // Fallback to dark grey if image loading fails
+                    setBackgroundColor(Color.parseColor("#2D2D2D"))
+                }
             } else {
-                // Fallback to a solid color if no matching images are found
-                setBackgroundColor(if (userProfile == "A") Color.BLUE else Color.DKGRAY)
+                // Fallback to dark grey if no matching images are found
+                Log.w(TAG, "No background images found for profile: $userProfile")
+                setBackgroundColor(Color.parseColor("#2D2D2D"))
             }
+        }
+    }
+
+    private fun refreshBackgroundImage() {
+        val userProfile = readProfile()
+        Log.d(TAG, "refreshBackgroundImage called, userProfile: $userProfile, backgroundImageView is null: ${backgroundImageView == null}")
+        
+        if (backgroundImageView == null) {
+            Log.w(TAG, "backgroundImageView is null, cannot refresh")
+            return
+        }
+        
+        val imageView = backgroundImageView!!
+        // Always ensure dark grey background is set as fallback
+        imageView.setBackgroundColor(Color.parseColor("#2D2D2D"))
+        
+        if (userProfile == null) {
+            Log.d(TAG, "No user profile, using dark grey background")
+            return
+        }
+
+        // Always reload the background image when returning to launcher
+        // This ensures it's displayed even if it was cleared from memory
+        Log.d(TAG, "Refreshing background image for profile: $userProfile")
+        
+        val prefix = if (userProfile == "A") "bg_a_" else "bg_b_"
+        val fields = R.drawable::class.java.fields
+        // Only use the _orig.jpg files, not the XML files
+        val drawables = fields.filter { 
+            it.name.startsWith(prefix) && it.name.endsWith("_orig")
+        }
+
+        Log.d(TAG, "Found ${drawables.size} drawables with prefix: $prefix (filtered for _orig files)")
+
+        if (drawables.isNotEmpty()) {
+            try {
+                val randomDrawableId = drawables.random().getInt(null)
+                val drawableName = drawables.find { it.getInt(null) == randomDrawableId }?.name
+                Log.d(TAG, "Setting background image resource: $drawableName (id: $randomDrawableId)")
+                
+                // Clear any existing image first to force reload
+                imageView.setImageDrawable(null)
+                
+                // Set the new image
+                imageView.setImageResource(randomDrawableId)
+                
+                // Force a layout update
+                imageView.invalidate()
+                imageView.requestLayout()
+                
+                Log.d(TAG, "Successfully refreshed background image: $drawableName")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to refresh background image: ${e.message}", e)
+                e.printStackTrace()
+                // Image will fail to load, dark grey background will show through
+                imageView.setImageDrawable(null)
+            }
+        } else {
+            // No images found, ensure image is cleared so background shows
+            Log.w(TAG, "No background images found for profile: $userProfile")
+            imageView.setImageDrawable(null)
         }
     }
 
