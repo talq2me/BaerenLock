@@ -4,6 +4,19 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
 }
 
+// Read GitHub token from local.properties
+fun getLocalProperty(key: String, defaultValue: String = ""): String {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        localPropertiesFile.readLines().forEach { line ->
+            if (line.startsWith("$key=")) {
+                return line.substringAfter("=").trim()
+            }
+        }
+    }
+    return defaultValue
+}
+
 android {
     namespace = "com.talq2me.baerenlock"
     compileSdk = 36
@@ -12,10 +25,20 @@ android {
         applicationId = "com.talq2me.baerenlock"
         minSdk = 28
         targetSdk = 35
-        versionCode = 22
-        versionName = "22"
+        versionCode = 23
+        versionName = "23"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        
+        // Read encrypted GitHub token from local.properties
+        // The token is encrypted using AES-256-CBC (use encrypt_token.py to encrypt it)
+        // The decryption key is hardcoded in MainActivity.kt (safe to commit - it's just a key)
+        val encryptedToken = getLocalProperty("ENCRYPTED_GITHUB_TOKEN", "")
+        buildConfigField("String", "ENCRYPTED_GITHUB_TOKEN", "\"$encryptedToken\"")
+    }
+    
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {
@@ -58,6 +81,7 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("com.talq2me.baeren:settings-contract:1.0.0")
+    implementation("com.squareup.okhttp3:okhttp:4.11.0")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")

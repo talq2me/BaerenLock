@@ -21,6 +21,12 @@ object RewardManager {
     var currentRewardMinutes: Int = 0
     private var rewardTimer: Handler? = null
     private var rewardRunnable: Runnable? = null
+    private var usageTracker: RewardUsageTracker? = null
+    private var rewardSessionActive: Boolean = false
+    
+    // Store last reward session data for report generation
+    var lastRewardSessions: List<RewardUsageTracker.AppUsageSession>? = null
+    var lastRewardSummary: RewardUsageTracker.RewardSessionSummary? = null
 
     // Fixed set of apps allowed to run in the background (memory control)
     private val memoryAllowedApps = setOf(
@@ -60,6 +66,9 @@ object RewardManager {
         allowedApps.add(pkg)
         temporaryApps.add(pkg)
         saveAllowedApps(context)
+        
+        // Start tracking reward session usage
+        startRewardSessionTracking(context)
 
         rewardRunnable?.let { rewardTimer?.removeCallbacks(it) }
         rewardTimer = Handler(Looper.getMainLooper())
@@ -362,7 +371,8 @@ object RewardManager {
         
         val lastRewardDate = prefs.getLong("last_reward_date", 0L)
         
-        if (lastRewardDate != today && lastRewardDate != 0L) {
+        // Reset to 0 if it's a new day (including first time load when lastRewardDate is 0L)
+        if (lastRewardDate != today) {
             // It's a new day - reset reward minutes to 0
             Log.d("RewardManager", "New day detected (last: $lastRewardDate, today: $today). Resetting reward minutes to 0.")
             currentRewardMinutes = 0
@@ -390,7 +400,44 @@ object RewardManager {
             lastKnownForegroundApp = packageName
             lastForegroundAppUpdateTime = System.currentTimeMillis()
             Log.d("RewardManager", "Updated last known foreground app: $packageName")
+            
+            // Track app usage if reward session is active
+            if (rewardSessionActive && currentRewardMinutes > 0) {
+                usageTracker?.onAppForeground(packageName)
+            }
         }
+    }
+    
+    /**
+     * Starts tracking reward session usage
+     */
+    fun startRewardSessionTracking(context: Context) {
+        if (!rewardSessionActive) {
+            usageTracker = RewardUsageTracker(context)
+            usageTracker?.startRewardSession()
+            rewardSessionActive = true
+            Log.d("RewardManager", "Started reward session tracking")
+        }
+    }
+    
+    /**
+     * Ends reward session tracking and returns the usage data
+     */
+    fun endRewardSessionTracking(): Pair<List<RewardUsageTracker.AppUsageSession>, RewardUsageTracker.RewardSessionSummary>? {
+        if (rewardSessionActive && usageTracker != null) {
+            val sessions = usageTracker!!.endRewardSession()
+            val summary = usageTracker!!.getSessionSummary()
+            
+            // Store for report generation
+            lastRewardSessions = sessions
+            lastRewardSummary = summary
+            
+            rewardSessionActive = false
+            usageTracker = null
+            Log.d("RewardManager", "Ended reward session tracking. Sessions: ${sessions.size}")
+            return Pair(sessions, summary)
+        }
+        return null
     }
     
     /**
@@ -521,6 +568,21 @@ object RewardManager {
                         saveAllowedApps(context)
                         Log.d("RewardManager", "Reward time expired. Temporary apps removed. Killing reward apps.")
 
+                        // End reward session tracking and send broadcast with usage data
+                        val usageData = endRewardSessionTracking()
+                        val intent = Intent(LauncherActivity.ACTION_REWARD_EXPIRED).apply {
+                            putExtra("has_usage_data", usageData != null)
+                        }
+                        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
+                        Log.d("RewardManager", "Sent ACTION_REWARD_EXPIRED broadcast.")
+                        
+                        // Also send a separate broadcast for report generation
+                        if (usageData != null) {
+                            val reportIntent = Intent("com.talq2me.baerenlock.ACTION_GENERATE_REWARD_REPORT")
+                            androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(context).sendBroadcast(reportIntent)
+                            Log.d("RewardManager", "Sent ACTION_GENERATE_REWARD_REPORT broadcast.")
+                        }
+
                         // Kill reward-eligible apps that were granted access
                         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
                         for (pkg in rewardEligibleApps) {
@@ -532,15 +594,15 @@ object RewardManager {
                             }
                         }
 
-                        // Send broadcast to LauncherActivity to refresh UI
-                        val intent = Intent(LauncherActivity.ACTION_REWARD_EXPIRED)
-                        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
-                        Log.d("RewardManager", "Sent ACTION_REWARD_EXPIRED broadcast.")
-
                         // Stop the timer since reward time is 0
                         rewardTimer?.removeCallbacks(this)
                         rewardRunnable = null
                         Log.d("RewardManager", "Reward timer stopped as minutes reached 0.")
+                        
+                        // Trigger report generation if we have usage data
+                        if (usageData != null && context is android.app.Activity) {
+                            (context as? MainActivity)?.generateAndUploadRewardReport(usageData.first, usageData.second)
+                        }
 
                     } else {
                         // Schedule next check for 1 minute (always check every minute, but only decrement if in foreground)
