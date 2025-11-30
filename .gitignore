@@ -27,3 +27,7 @@ gitignore
 # ===========
 .DS_Store
 /app/src/main/java/com/talq2me/baerenlock/Baeren.code-workspace
+
+# Release files
+# ===========
+commitMessage.txt
