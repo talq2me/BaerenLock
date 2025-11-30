@@ -31,3 +31,4 @@ gitignore
 # Release files
 # ===========
 commitMessage.txt
+local.properties
