@@ -46,6 +46,10 @@ class LauncherActivity : AppCompatActivity() {
             if (intent?.action == ACTION_REWARD_EXPIRED) {
                 Log.d(TAG, "Received ACTION_REWARD_EXPIRED broadcast. Refreshing UI.")
                 updateRewardMinutesDisplay()
+            } else if (intent?.action == RewardTimeReceiver.ACTION_REWARD_TIME_UPDATED) {
+                Log.d(TAG, "Received ACTION_REWARD_TIME_UPDATED broadcast. Refreshing UI.")
+                RewardManager.loadRewardMinutes(this@LauncherActivity)
+                updateRewardMinutesDisplay()
             }
         }
     }
@@ -173,16 +177,19 @@ class LauncherActivity : AppCompatActivity() {
         RewardManager.loadAllowedApps(this)
         RewardManager.loadRewardMinutes(this)
 
-        val incomingRewardMinutes = intent.getIntExtra("reward_minutes", 0)
-        if (incomingRewardMinutes > 0) {
-            RewardManager.currentRewardMinutes += incomingRewardMinutes
-            RewardManager.saveRewardMinutes(this)
-            intent.removeExtra("reward_minutes")
-            updateRewardMinutesDisplay()
-        }
+        // Check for reward minutes from intent
+        processIncomingRewardMinutes(intent)
 
         refreshIcons(appGrid)
         startRewardDisplayUpdate()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        Log.d(TAG, "onNewIntent called - checking for reward minutes")
+        // Process reward minutes when activity is already running
+        processIncomingRewardMinutes(intent)
     }
 
     override fun onResume() {
@@ -205,10 +212,17 @@ class LauncherActivity : AppCompatActivity() {
             RewardManager.startRewardTimer(this)
         }
 
+        // Check for reward minutes from intent (in case we missed it in onCreate/onNewIntent)
+        processIncomingRewardMinutes(intent)
+
         startRewardDisplayUpdate()
 
+        val filter = IntentFilter().apply {
+            addAction(ACTION_REWARD_EXPIRED)
+            addAction(RewardTimeReceiver.ACTION_REWARD_TIME_UPDATED)
+        }
         LocalBroadcastManager.getInstance(this).registerReceiver(
-            rewardExpiredReceiver, IntentFilter(ACTION_REWARD_EXPIRED)
+            rewardExpiredReceiver, filter
         )
     }
 
@@ -520,7 +534,7 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun showSettingsMenu() {
-        val options = arrayOf("App Whitelist", "Reward Apps", "Blocked Apps", "Change PIN", "Change Profile", "Change Parent Email")
+        val options = arrayOf("App Whitelist", "Reward Apps", "Blocked Apps", "Change PIN", "Change Profile", "Change Parent Email", "Add Reward Time")
         AlertDialog.Builder(this)
             .setTitle("Settings")
             .setItems(options) { _, which ->
@@ -531,6 +545,7 @@ class LauncherActivity : AppCompatActivity() {
                     3 -> showChangePinDialog()
                     4 -> showChangeProfileDialog()
                     5 -> showChangeEmailDialog()
+                    6 -> showAddRewardTimeDialog()
                 }
             }
             .show()
@@ -616,6 +631,78 @@ class LauncherActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun showAddRewardTimeDialog() {
+        val input = EditText(this).apply {
+            hint = "Enter reward minutes"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            requestFocus()
+        }
+
+        val container = FrameLayout(this).apply {
+            setPadding(50, 20, 50, 20)
+            addView(input)
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Add Reward Time")
+            .setMessage("Enter the number of reward minutes to add:")
+            .setView(container)
+            .setPositiveButton("Add", null) // Set to null initially to prevent auto-dismiss
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        dialog.setOnShowListener {
+            val positiveButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            positiveButton.setOnClickListener {
+                val minutesText = input.text.toString().trim()
+                val minutes = minutesText.toIntOrNull()
+                
+                if (minutes != null && minutes > 0) {
+                    // Load current reward minutes
+                    RewardManager.loadRewardMinutes(this)
+                    
+                    // Add the new reward minutes
+                    RewardManager.currentRewardMinutes += minutes
+                    RewardManager.saveRewardMinutes(this)
+                    
+                    // Start timer if not already running
+                    if (RewardManager.currentRewardMinutes > 0) {
+                        RewardManager.startRewardTimer(this)
+                    }
+                    
+                    // Update the display
+                    updateRewardMinutesDisplay()
+                    
+                    Toast.makeText(this, "Added $minutes reward minutes. Total: ${RewardManager.currentRewardMinutes} minutes", Toast.LENGTH_SHORT).show()
+                    Log.d(TAG, "Manually added $minutes reward minutes. Total: ${RewardManager.currentRewardMinutes} minutes")
+                    
+                    dialog.dismiss()
+                } else {
+                    Toast.makeText(this, "Please enter a valid number of minutes (greater than 0)", Toast.LENGTH_SHORT).show()
+                }
+            }
+            
+            // Allow Enter key to submit
+            input.setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE || 
+                    actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
+                    positiveButton.performClick()
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+
+        dialog.show()
+        
+        // Show keyboard automatically
+        input.post {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+            imm.showSoftInput(input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        }
     }
 
     private fun createDailyBackgroundImageView(userProfile: String?): ImageView {
@@ -729,4 +816,27 @@ class LauncherActivity : AppCompatActivity() {
     private fun updateAccessibilityBanner(container: ViewGroup) {
         accessibilityBanner?.visibility = if (isAccessibilityServiceEnabled()) View.GONE else View.VISIBLE
     }
+
+    /**
+     * Processes incoming reward minutes from Intent.
+     * This handles reward time sent via Intent from BaerenEd.
+     */
+    private fun processIncomingRewardMinutes(intent: Intent?) {
+        if (intent == null) return
+        
+        val incomingRewardMinutes = intent.getIntExtra("reward_minutes", 0)
+        if (incomingRewardMinutes > 0) {
+            Log.d(TAG, "Received $incomingRewardMinutes reward minutes from Intent")
+            RewardManager.currentRewardMinutes += incomingRewardMinutes
+            RewardManager.saveRewardMinutes(this)
+            intent.removeExtra("reward_minutes")
+            updateRewardMinutesDisplay()
+            
+            // Start timer if not already running
+            if (RewardManager.currentRewardMinutes > 0) {
+                RewardManager.startRewardTimer(this)
+            }
+        }
+    }
+
 }

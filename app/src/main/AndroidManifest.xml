@@ -102,6 +102,14 @@
             android:name=".InstallResultReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".RewardTimeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.talq2me.baerenlock.ACTION_ADD_REWARD_TIME" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".AppBlockerService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
