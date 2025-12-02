@@ -23,6 +23,8 @@ object RewardManager {
     private var rewardRunnable: Runnable? = null
     private var usageTracker: RewardUsageTracker? = null
     private var rewardSessionActive: Boolean = false
+    private var lastRewardDecrementTime: Long = 0 // Track when we last decremented reward time
+    private var rewardTimeStartTime: Long = 0 // Track when reward time session started
     
     // Store last reward session data for report generation
     var lastRewardSessions: List<RewardUsageTracker.AppUsageSession>? = null
@@ -389,6 +391,16 @@ object RewardManager {
     }
 
     /**
+     * Resets the reward timer tracking when new reward time is added.
+     * This ensures accurate timing for the new reward time session.
+     */
+    private fun resetRewardTimerTracking() {
+        lastRewardDecrementTime = 0L
+        rewardTimeStartTime = 0L
+        Log.d("RewardManager", "Reset reward timer tracking for new reward time session")
+    }
+
+    /**
      * Checks if a transaction ID has already been processed.
      * This prevents double-counting when both Intent and Broadcast are received.
      */
@@ -577,9 +589,22 @@ object RewardManager {
     /**
      * Starts the reward timer to decrement minutes and update storage.
      * Only decrements when a reward-eligible app is actually in the foreground.
+     * Checks every 10 seconds to ensure accurate timing even if system is busy.
      */
     fun startRewardTimer(context: Context) {
         Log.d("RewardManager", "startRewardTimer called. Current minutes: $currentRewardMinutes")
+        
+        // Initialize timing tracking if this is a new session (timer not running)
+        val currentTime = System.currentTimeMillis()
+        val isNewSession = (lastRewardDecrementTime == 0L || rewardRunnable == null)
+        
+        if (isNewSession) {
+            lastRewardDecrementTime = currentTime
+            rewardTimeStartTime = currentTime
+            Log.d("RewardManager", "Initialized reward timer tracking for new session. Start time: $currentTime")
+        } else {
+            Log.d("RewardManager", "Timer already running, continuing existing session. Last decrement: $lastRewardDecrementTime")
+        }
         
         // Always remove any existing callbacks to prevent duplicate timers
         rewardRunnable?.let { rewardTimer?.removeCallbacks(it) }
@@ -588,14 +613,34 @@ object RewardManager {
         rewardRunnable = object : Runnable {
             override fun run() {
                 if (currentRewardMinutes > 0) {
+                    val now = System.currentTimeMillis()
+                    val timeSinceLastDecrement = now - lastRewardDecrementTime
+                    val oneMinuteInMillis = 60 * 1000L
+                    
                     // Only decrement if a reward app is actually in the foreground
+                    // AND at least 1 minute has elapsed since last decrement
                     if (isRewardAppInForeground(context)) {
-                        currentRewardMinutes -= 1 // Decrement every minute
-                        if (currentRewardMinutes < 0) currentRewardMinutes = 0
-                        saveRewardMinutes(context)
-                        Log.d("RewardManager", "Reward app in foreground - minutes decremented to: $currentRewardMinutes")
+                        if (timeSinceLastDecrement >= oneMinuteInMillis) {
+                            // Calculate how many full minutes have elapsed
+                            val minutesToDecrement = (timeSinceLastDecrement / oneMinuteInMillis).toInt()
+                            currentRewardMinutes -= minutesToDecrement
+                            if (currentRewardMinutes < 0) currentRewardMinutes = 0
+                            
+                            // Update the last decrement time to account for the time we just decremented
+                            lastRewardDecrementTime += (minutesToDecrement * oneMinuteInMillis)
+                            
+                            saveRewardMinutes(context)
+                            Log.d("RewardManager", "Reward app in foreground - decremented $minutesToDecrement minute(s). Remaining: $currentRewardMinutes minutes")
+                        } else {
+                            // Not enough time has passed yet, but app is in foreground
+                            val secondsRemaining = ((oneMinuteInMillis - timeSinceLastDecrement) / 1000).toInt()
+                            Log.d("RewardManager", "Reward app in foreground - $secondsRemaining seconds until next decrement (remaining: $currentRewardMinutes minutes)")
+                        }
                     } else {
-                        Log.d("RewardManager", "No reward app in foreground - skipping decrement (minutes: $currentRewardMinutes)")
+                        // No reward app in foreground - don't decrement, but update last decrement time
+                        // to prevent accumulating time when app is not in foreground
+                        lastRewardDecrementTime = now
+                        Log.d("RewardManager", "No reward app in foreground - skipping decrement (remaining: $currentRewardMinutes minutes)")
                     }
 
                     if (currentRewardMinutes == 0) {
@@ -634,6 +679,8 @@ object RewardManager {
                         // Stop the timer since reward time is 0
                         rewardTimer?.removeCallbacks(this)
                         rewardRunnable = null
+                        lastRewardDecrementTime = 0L
+                        rewardTimeStartTime = 0L
                         Log.d("RewardManager", "Reward timer stopped as minutes reached 0.")
                         
                         // Trigger report generation if we have usage data
@@ -642,13 +689,15 @@ object RewardManager {
                         }
 
                     } else {
-                        // Schedule next check for 1 minute (always check every minute, but only decrement if in foreground)
-                        rewardTimer?.postDelayed(this, 1 * 60 * 1000L)
+                        // Schedule next check in 10 seconds (check frequently for accuracy)
+                        rewardTimer?.postDelayed(this, 10 * 1000L)
                     }
                 } else {
                     // No reward time left, stop the timer
                     rewardTimer?.removeCallbacks(this)
                     rewardRunnable = null
+                    lastRewardDecrementTime = 0L
+                    rewardTimeStartTime = 0L
                     Log.d("RewardManager", "Reward timer stopped.")
                 }
             }
