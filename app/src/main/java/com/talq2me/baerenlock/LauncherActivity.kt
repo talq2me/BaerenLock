@@ -820,19 +820,46 @@ class LauncherActivity : AppCompatActivity() {
     /**
      * Processes incoming reward minutes from Intent.
      * This handles reward time sent via Intent from BaerenEd.
+     * Uses transaction ID to prevent double-counting if both Intent and Broadcast are received.
      */
     private fun processIncomingRewardMinutes(intent: Intent?) {
         if (intent == null) return
         
         val incomingRewardMinutes = intent.getIntExtra("reward_minutes", 0)
-        if (incomingRewardMinutes > 0) {
-            Log.d(TAG, "Received $incomingRewardMinutes reward minutes from Intent")
+        val transactionId = intent.getLongExtra("reward_transaction_id", 0L)
+        
+        if (incomingRewardMinutes > 0 && transactionId > 0) {
+            // Check if we've already processed this transaction
+            if (RewardManager.isTransactionProcessed(this, transactionId)) {
+                Log.d(TAG, "Transaction ID $transactionId already processed, skipping to prevent double-counting")
+                intent.removeExtra("reward_minutes")
+                intent.removeExtra("reward_transaction_id")
+                return
+            }
+            
+            Log.d(TAG, "Received $incomingRewardMinutes reward minutes from Intent (transaction ID: $transactionId)")
+            RewardManager.currentRewardMinutes += incomingRewardMinutes
+            RewardManager.saveRewardMinutes(this)
+            
+            // Mark this transaction as processed
+            RewardManager.markTransactionProcessed(this, transactionId)
+            
+            intent.removeExtra("reward_minutes")
+            intent.removeExtra("reward_transaction_id")
+            updateRewardMinutesDisplay()
+            
+            // Start timer if not already running
+            if (RewardManager.currentRewardMinutes > 0) {
+                RewardManager.startRewardTimer(this)
+            }
+        } else if (incomingRewardMinutes > 0 && transactionId == 0L) {
+            // Legacy support: if no transaction ID, process it but log a warning
+            Log.w(TAG, "Received reward minutes without transaction ID (legacy format). Processing anyway.")
             RewardManager.currentRewardMinutes += incomingRewardMinutes
             RewardManager.saveRewardMinutes(this)
             intent.removeExtra("reward_minutes")
             updateRewardMinutesDisplay()
             
-            // Start timer if not already running
             if (RewardManager.currentRewardMinutes > 0) {
                 RewardManager.startRewardTimer(this)
             }

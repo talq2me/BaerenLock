@@ -32,6 +32,7 @@ import android.os.Environment
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.FileProvider
 import com.talq2me.baerenlock.DevicePolicyManager as CustomDevicePolicyManager
+import com.talq2me.contract.SettingsContract
 import java.io.File
 import org.json.JSONObject
 import java.net.URL
@@ -45,6 +46,7 @@ import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.*
 import android.os.Build
 import androidx.lifecycle.lifecycleScope
+import java.util.Calendar
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -54,10 +56,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // GitHub upload configuration
         // GitHub token is encrypted using AES-256-CBC and stored in BuildConfig
         // Repository: BaerenCloud (dedicated repository for reports and artifacts)
-        // Reports path: BaerenLock_Reports/
+        // Reports path: BaerenEd_Reports/ (same as BaerenEd for consistency)
         private const val GITHUB_OWNER = "talq2me"
         private const val GITHUB_REPO = "BaerenCloud"
-        private const val GITHUB_REPORTS_PATH = "BaerenLock_Reports"  // Directory in repo for reports
+        private const val GITHUB_REPORTS_PATH = "BaerenEd_Reports"  // Directory in repo for reports (same as BaerenEd)
         
         fun checkForUpdate(context: Context) {
             checkForUpdate(context, false)
@@ -808,6 +810,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     
     /**
      * Generates and uploads reward usage report to GitHub
+     * Reports are appended to a daily file (AM_Rewards_Usage.txt or BM_Rewards_Usage.txt)
+     * First upload of the day overwrites the file, subsequent uploads append to it
      */
     fun generateAndUploadRewardReport(
         sessions: List<RewardUsageTracker.AppUsageSession>,
@@ -817,12 +821,34 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val settingsPrefs = getSharedPreferences("settings", MODE_PRIVATE)
         val childName = settingsPrefs.getString("child_name", "Child") ?: "Child"
         
-        // Generate report
-        val reportGenerator = RewardReportGenerator()
-        val report = reportGenerator.generateReport(sessions, summary, childName)
+        // Get profile (A or B) to determine filename
+        val profile = readProfile()
+        val profilePrefix = if (profile == "A") "AM" else "BM"
         
-        // Upload to GitHub
-        uploadReportToGitHub(report, childName)
+        // Generate report section (for appending)
+        val reportGenerator = RewardReportGenerator()
+        val reportSection = reportGenerator.generateReportSection(sessions, summary, childName)
+        
+        // Upload to GitHub (with append logic)
+        uploadReportToGitHub(reportSection, profilePrefix)
+    }
+    
+    /**
+     * Reads the current profile (A or B) from SettingsContract
+     */
+    private fun readProfile(): String {
+        return try {
+            contentResolver.query(SettingsContract.CONTENT_URI, arrayOf(SettingsContract.KEY_PROFILE), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getString(cursor.getColumnIndexOrThrow(SettingsContract.KEY_PROFILE)) ?: "A"
+                } else {
+                    "A" // Default to A if no profile set
+                }
+            } ?: "A"
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read profile from provider, defaulting to A", e)
+            "A" // Default to A on error
+        }
     }
     
     /**
@@ -880,11 +906,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     
     /**
      * Automatically uploads the reward usage report to GitHub as a text file
-     * No user interaction required - fully automated
+     * Reports are appended to a daily file (AM_Rewards_Usage.txt or BM_Rewards_Usage.txt)
+     * First upload of the day overwrites the file, subsequent uploads append to it
      */
     private fun uploadReportToGitHub(
-        report: String,
-        childName: String
+        reportSection: String,
+        profilePrefix: String
     ) {
         // Decrypt GitHub token at runtime (encrypted token and key stored in BuildConfig)
         val githubToken = decryptGitHubToken()
@@ -903,26 +930,34 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .create()
         progressDialog.show()
         
+        // Get preferences and calculate today's date before coroutine
+        val prefs = getSharedPreferences("reward_report_prefs", MODE_PRIVATE)
+        val today = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        
+        val lastUploadDate = prefs.getLong("last_reward_report_upload_date_$profilePrefix", 0L)
+        val isFirstUploadOfDay = lastUploadDate != today
+        
         // Use coroutines for async work
         lifecycleScope.launch(Dispatchers.IO) {
             val client = OkHttpClient()
             try {
-                // Create simple filename - one file per kid per day, always overwrite
-                val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-                val dateStr = dateFormat.format(Date())
-                val fileName = "${childName.replace(" ", "_")}_$dateStr.txt"
+                // Create filename based on profile: AM_Rewards_Usage.txt or BM_Rewards_Usage.txt
+                val fileName = "${profilePrefix}_Rewards_Usage.txt"
                 val filePath = "$GITHUB_REPORTS_PATH/$fileName"
-                
-                // Base64 encode the content (GitHub API requirement)
-                val contentBytes = report.toByteArray(Charsets.UTF_8)
-                val base64Content = Base64.encodeToString(contentBytes, Base64.NO_WRAP)
                 
                 // GitHub API endpoint
                 val apiUrl = "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/contents/$filePath"
                 
-                // Check if file exists first (to get SHA for update)
+                // Get existing file content if it exists and we're appending
+                var existingContent = ""
                 var existingSha: String? = null
                 var isUpdate = false
+                
                 try {
                     val checkRequest = Request.Builder()
                         .url(apiUrl)
@@ -936,8 +971,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                             if (!checkBody.isNullOrEmpty()) {
                                 val fileInfo = JSONObject(checkBody)
                                 existingSha = fileInfo.optString("sha", null)
-                                isUpdate = true
-                                Log.d(TAG, "File exists, will overwrite. SHA: $existingSha")
+                                val existingContentBase64 = fileInfo.optString("content", "")
+                                
+                                // Decode existing content
+                                if (existingContentBase64.isNotEmpty()) {
+                                    // GitHub API returns content with newlines, need to remove them before decoding
+                                    val cleanBase64 = existingContentBase64.replace("\n", "").replace("\r", "")
+                                    val existingContentBytes = Base64.decode(cleanBase64, Base64.DEFAULT)
+                                    existingContent = String(existingContentBytes, Charsets.UTF_8)
+                                    isUpdate = true
+                                    Log.d(TAG, "File exists, will ${if (isFirstUploadOfDay) "overwrite" else "append"}. SHA: $existingSha")
+                                }
                             }
                         }
                     }
@@ -946,11 +990,36 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     Log.d(TAG, "File doesn't exist yet, will create new file")
                 }
                 
-                // Create JSON payload for GitHub API
-                val commitMessage = if (isUpdate) {
-                    "Update reward usage report for $childName"
+                // Build final content
+                val finalContent = if (isFirstUploadOfDay || !isUpdate) {
+                    // First upload of the day or file doesn't exist - create new file
+                    buildString {
+                        appendLine("🎮 REWARD TIME USAGE REPORT - ${profilePrefix}")
+                        appendLine("=".repeat(50))
+                        appendLine("Date: ${java.text.SimpleDateFormat("MMMM dd, yyyy", Locale.getDefault()).format(Date())}")
+                        appendLine()
+                        append(reportSection)
+                    }
                 } else {
-                    "Create reward usage report for $childName"
+                    // Not first upload - append to existing content
+                    buildString {
+                        append(existingContent)
+                        if (!existingContent.endsWith("\n")) {
+                            appendLine()
+                        }
+                        append(reportSection)
+                    }
+                }
+                
+                // Base64 encode the content (GitHub API requirement)
+                val contentBytes = finalContent.toByteArray(Charsets.UTF_8)
+                val base64Content = Base64.encodeToString(contentBytes, Base64.NO_WRAP)
+                
+                // Create JSON payload for GitHub API
+                val commitMessage = if (isFirstUploadOfDay || !isUpdate) {
+                    "Create/Reset reward usage report for $profilePrefix"
+                } else {
+                    "Append reward usage report for $profilePrefix"
                 }
                 val json = JSONObject().apply {
                     put("message", commitMessage)
@@ -979,6 +1048,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         progressDialog.dismiss()
                         
                         if (response.isSuccessful) {
+                            // Update last upload date
+                            prefs.edit().putLong("last_reward_report_upload_date_$profilePrefix", today).apply()
+                            
                             Log.d(TAG, "Report uploaded successfully to GitHub: $filePath")
                             Toast.makeText(this@MainActivity, "Report uploaded!", Toast.LENGTH_SHORT).show()
                         } else {

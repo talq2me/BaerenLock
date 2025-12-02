@@ -388,6 +388,43 @@ object RewardManager {
         }
     }
 
+    /**
+     * Checks if a transaction ID has already been processed.
+     * This prevents double-counting when both Intent and Broadcast are received.
+     */
+    fun isTransactionProcessed(context: Context, transactionId: Long): Boolean {
+        val prefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
+        val processedIds = prefs.getStringSet("processed_transaction_ids", mutableSetOf()) ?: mutableSetOf()
+        return processedIds.contains(transactionId.toString())
+    }
+
+    /**
+     * Marks a transaction ID as processed to prevent double-counting.
+     * Also cleans up old transaction IDs (older than 24 hours) to prevent unbounded growth.
+     */
+    fun markTransactionProcessed(context: Context, transactionId: Long) {
+        val prefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
+        val processedIds = mutableSetOf<String>()
+        processedIds.addAll(prefs.getStringSet("processed_transaction_ids", mutableSetOf()) ?: mutableSetOf())
+        
+        // Add the new transaction ID
+        processedIds.add(transactionId.toString())
+        
+        // Clean up old transaction IDs (older than 24 hours)
+        val currentTime = System.currentTimeMillis()
+        val oneDayInMillis = 24 * 60 * 60 * 1000L
+        val cleanedIds = processedIds.filter { id ->
+            val idTime = id.toLongOrNull() ?: 0L
+            currentTime - idTime < oneDayInMillis
+        }.toSet()
+        
+        prefs.edit()
+            .putStringSet("processed_transaction_ids", cleanedIds)
+            .apply()
+        
+        Log.d("RewardManager", "Marked transaction ID $transactionId as processed. Total tracked: ${cleanedIds.size}")
+    }
+
     // Track the last known foreground app (updated by AppBlockerService or our own checks)
     private var lastKnownForegroundApp: String? = null
     private var lastForegroundAppUpdateTime: Long = 0
