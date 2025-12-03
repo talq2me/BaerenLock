@@ -641,20 +641,32 @@ object RewardManager {
                     
                     // Try to use UsageStatsManager for accurate tracking (if permission available)
                     if (hasUsageStatsPermission(context)) {
-                        val actualUsageMinutes = getActualRewardAppUsageMinutes(context, rewardTimeStartTime, now)
-                        val expectedMinutesUsed = rewardTimeStartMinutes - currentRewardMinutes
-                        val actualMinutesUsed = actualUsageMinutes
+                        // Only calculate usage if enough time has passed since timer started
+                        // This prevents counting historical usage data when timer first starts
+                        val timeSinceStart = now - rewardTimeStartTime
+                        val minimumTimeForUsageCheck = 30 * 1000L // Wait at least 30 seconds before checking UsageStats
                         
-                        // Update current minutes based on actual usage
-                        val newCurrentMinutes = rewardTimeStartMinutes - actualMinutesUsed
-                        if (newCurrentMinutes != currentRewardMinutes) {
-                            val difference = currentRewardMinutes - newCurrentMinutes
-                            if (difference > 0) {
-                                Log.d("RewardManager", "UsageStats: Actual usage shows $actualMinutesUsed minutes used (expected: $expectedMinutesUsed). Adjusting from $currentRewardMinutes to $newCurrentMinutes minutes")
+                        if (timeSinceStart >= minimumTimeForUsageCheck) {
+                            val actualUsageMinutes = getActualRewardAppUsageMinutes(context, rewardTimeStartTime, now)
+                            val expectedMinutesUsed = rewardTimeStartMinutes - currentRewardMinutes
+                            val actualMinutesUsed = actualUsageMinutes
+                            
+                            Log.d("RewardManager", "UsageStats check: timeSinceStart=${timeSinceStart/1000}s, actualUsage=$actualMinutesUsed min, expected=$expectedMinutesUsed min, current=$currentRewardMinutes min, start=$rewardTimeStartMinutes min")
+                            
+                            // Update current minutes based on actual usage
+                            val newCurrentMinutes = rewardTimeStartMinutes - actualMinutesUsed
+                            if (newCurrentMinutes != currentRewardMinutes) {
+                                val difference = currentRewardMinutes - newCurrentMinutes
+                                if (difference > 0) {
+                                    Log.d("RewardManager", "UsageStats: Actual usage shows $actualMinutesUsed minutes used (expected: $expectedMinutesUsed). Adjusting from $currentRewardMinutes to $newCurrentMinutes minutes")
+                                }
+                                currentRewardMinutes = newCurrentMinutes.coerceAtLeast(0)
+                                saveRewardMinutes(context)
+                                lastUsageCheckTime = now
                             }
-                            currentRewardMinutes = newCurrentMinutes.coerceAtLeast(0)
-                            saveRewardMinutes(context)
-                            lastUsageCheckTime = now
+                        } else {
+                            // Too soon to check UsageStats, just log and continue
+                            Log.d("RewardManager", "UsageStats check skipped: only ${timeSinceStart/1000}s since timer started (need ${minimumTimeForUsageCheck/1000}s). Current minutes: $currentRewardMinutes")
                         }
                     } else {
                         // Fallback to timer-based tracking if UsageStats not available
@@ -803,9 +815,19 @@ object RewardManager {
             return 0
         }
         
+        // Safety check: if the time range is too small (less than 30 seconds), return 0
+        // This prevents counting historical usage when timer first starts
+        val timeRange = endTime - startTime
+        if (timeRange < 30 * 1000L) {
+            Log.d("RewardManager", "UsageStats query skipped: time range too small (${timeRange/1000}s), returning 0")
+            return 0
+        }
+        
         try {
             val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
             var totalUsageMillis = 0L
+            
+            Log.d("RewardManager", "Querying UsageStats from ${java.util.Date(startTime)} to ${java.util.Date(endTime)} (${timeRange/1000}s range)")
             
             // Query usage stats for each reward-eligible app
             for (packageName in rewardEligibleApps) {
@@ -831,7 +853,7 @@ object RewardManager {
             
             // Convert to minutes (round down)
             val usageMinutes = (totalUsageMillis / (60 * 1000)).toInt()
-            Log.d("RewardManager", "Total actual usage: $usageMinutes minutes (${totalUsageMillis / 1000} seconds)")
+            Log.d("RewardManager", "Total actual usage: $usageMinutes minutes (${totalUsageMillis / 1000} seconds) over ${timeRange/1000}s period")
             return usageMinutes
         } catch (e: Exception) {
             Log.e("RewardManager", "Error getting actual usage from UsageStatsManager: ${e.message}", e)
