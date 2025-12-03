@@ -826,10 +826,26 @@ class LauncherActivity : AppCompatActivity() {
      * Uses transaction ID to prevent double-counting if both Intent and Broadcast are received.
      */
     private fun processIncomingRewardMinutes(intent: Intent?) {
-        if (intent == null) return
+        if (intent == null) {
+            Log.d(TAG, "processIncomingRewardMinutes: intent is null")
+            return
+        }
+        
+        // Log all extras for debugging
+        val extras = intent.extras
+        if (extras != null) {
+            Log.d(TAG, "processIncomingRewardMinutes: Intent has ${extras.size()} extras")
+            for (key in extras.keySet()) {
+                Log.d(TAG, "  Extra: $key = ${extras.get(key)}")
+            }
+        } else {
+            Log.d(TAG, "processIncomingRewardMinutes: Intent has no extras")
+        }
         
         val incomingRewardMinutes = intent.getIntExtra("reward_minutes", 0)
         val transactionId = intent.getLongExtra("reward_transaction_id", 0L)
+        
+        Log.d(TAG, "processIncomingRewardMinutes: rewardMinutes=$incomingRewardMinutes, transactionId=$transactionId")
         
         if (incomingRewardMinutes > 0 && transactionId > 0) {
             // Check if we've already processed this transaction
@@ -840,7 +856,9 @@ class LauncherActivity : AppCompatActivity() {
                 return
             }
             
-            Log.d(TAG, "Received $incomingRewardMinutes reward minutes from Intent (transaction ID: $transactionId)")
+            Log.d(TAG, "Processing $incomingRewardMinutes reward minutes from Intent (transaction ID: $transactionId)")
+            RewardManager.loadRewardMinutes(this)
+            val previousMinutes = RewardManager.currentRewardMinutes
             RewardManager.currentRewardMinutes += incomingRewardMinutes
             RewardManager.saveRewardMinutes(this)
             
@@ -854,6 +872,8 @@ class LauncherActivity : AppCompatActivity() {
             intent.removeExtra("reward_transaction_id")
             updateRewardMinutesDisplay()
             
+            Log.d(TAG, "Successfully added $incomingRewardMinutes minutes from Intent. Previous: $previousMinutes, New total: ${RewardManager.currentRewardMinutes} minutes")
+            
             // Start timer if not already running
             if (RewardManager.currentRewardMinutes > 0) {
                 RewardManager.startRewardTimer(this)
@@ -861,6 +881,8 @@ class LauncherActivity : AppCompatActivity() {
         } else if (incomingRewardMinutes > 0 && transactionId == 0L) {
             // Legacy support: if no transaction ID, process it but log a warning
             Log.w(TAG, "Received reward minutes without transaction ID (legacy format). Processing anyway.")
+            RewardManager.loadRewardMinutes(this)
+            val previousMinutes = RewardManager.currentRewardMinutes
             RewardManager.currentRewardMinutes += incomingRewardMinutes
             RewardManager.saveRewardMinutes(this)
             
@@ -870,9 +892,13 @@ class LauncherActivity : AppCompatActivity() {
             intent.removeExtra("reward_minutes")
             updateRewardMinutesDisplay()
             
+            Log.d(TAG, "Legacy format: Added $incomingRewardMinutes minutes. Previous: $previousMinutes, New total: ${RewardManager.currentRewardMinutes} minutes")
+            
             if (RewardManager.currentRewardMinutes > 0) {
                 RewardManager.startRewardTimer(this)
             }
+        } else {
+            Log.d(TAG, "No valid reward minutes in Intent (rewardMinutes=$incomingRewardMinutes, transactionId=$transactionId)")
         }
     }
 

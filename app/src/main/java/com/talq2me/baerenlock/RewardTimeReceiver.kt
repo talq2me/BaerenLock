@@ -20,9 +20,12 @@ class RewardTimeReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
+        Log.d(TAG, "onReceive called with action: ${intent.action}")
         if (intent.action == ACTION_ADD_REWARD_TIME) {
             val rewardMinutes = intent.getIntExtra(EXTRA_REWARD_MINUTES, 0)
             val transactionId = intent.getLongExtra("reward_transaction_id", 0L)
+            
+            Log.d(TAG, "Received broadcast: rewardMinutes=$rewardMinutes, transactionId=$transactionId")
             
             if (rewardMinutes > 0 && transactionId > 0) {
                 // Check if we've already processed this transaction (e.g., via Intent)
@@ -31,10 +34,11 @@ class RewardTimeReceiver : BroadcastReceiver() {
                     return
                 }
                 
-                Log.d(TAG, "Received $rewardMinutes reward minutes via broadcast from BaerenEd (transaction ID: $transactionId)")
+                Log.d(TAG, "Processing $rewardMinutes reward minutes via broadcast from BaerenEd (transaction ID: $transactionId)")
                 
                 // Load current reward minutes
                 RewardManager.loadRewardMinutes(context)
+                val previousMinutes = RewardManager.currentRewardMinutes
                 
                 // Add the new reward minutes
                 RewardManager.currentRewardMinutes += rewardMinutes
@@ -51,7 +55,7 @@ class RewardTimeReceiver : BroadcastReceiver() {
                     RewardManager.startRewardTimer(context)
                 }
                 
-                Log.d(TAG, "Successfully added $rewardMinutes minutes. Total: ${RewardManager.currentRewardMinutes} minutes")
+                Log.d(TAG, "Successfully added $rewardMinutes minutes. Previous: $previousMinutes, New total: ${RewardManager.currentRewardMinutes} minutes")
                 
                 // Send local broadcast to update UI
                 val localIntent = Intent(ACTION_REWARD_TIME_UPDATED)
@@ -60,6 +64,7 @@ class RewardTimeReceiver : BroadcastReceiver() {
                 // Legacy support: if no transaction ID, process it but log a warning
                 Log.w(TAG, "Received reward minutes without transaction ID (legacy format). Processing anyway.")
                 RewardManager.loadRewardMinutes(context)
+                val previousMinutes = RewardManager.currentRewardMinutes
                 RewardManager.currentRewardMinutes += rewardMinutes
                 RewardManager.saveRewardMinutes(context)
                 
@@ -70,11 +75,15 @@ class RewardTimeReceiver : BroadcastReceiver() {
                     RewardManager.startRewardTimer(context)
                 }
                 
+                Log.d(TAG, "Legacy format: Added $rewardMinutes minutes. Previous: $previousMinutes, New total: ${RewardManager.currentRewardMinutes} minutes")
+                
                 val localIntent = Intent(ACTION_REWARD_TIME_UPDATED)
                 LocalBroadcastManager.getInstance(context).sendBroadcast(localIntent)
             } else {
                 Log.w(TAG, "Received broadcast with invalid reward minutes: $rewardMinutes or transaction ID: $transactionId")
             }
+        } else {
+            Log.w(TAG, "Received broadcast with unexpected action: ${intent.action}")
         }
     }
 }

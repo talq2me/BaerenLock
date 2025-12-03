@@ -721,6 +721,38 @@ object RewardManager {
                             }
                         }
 
+                        // Force return to BaerenLock launcher
+                        try {
+                            // First, try to go home using the HOME intent (most reliable)
+                            val homeIntent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
+                                addCategory(android.content.Intent.CATEGORY_HOME)
+                                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or 
+                                        android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                                        android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            }
+                            context.startActivity(homeIntent)
+                            Log.d("RewardManager", "Launched HOME intent to return to BaerenLock launcher")
+                            
+                            // Also try to start our launcher directly as backup (after a short delay)
+                            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                try {
+                                    val launcherIntent = android.content.Intent(context, com.talq2me.baerenlock.LauncherActivity::class.java).apply {
+                                        flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                                                android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                                                android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                                android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                    }
+                                    context.startActivity(launcherIntent)
+                                    Log.d("RewardManager", "Launched LauncherActivity directly as backup")
+                                } catch (e: Exception) {
+                                    Log.e("RewardManager", "Failed to start launcher directly: ${e.message}", e)
+                                }
+                            }, 200) // 200ms delay to let HOME intent process first
+                            
+                        } catch (e: Exception) {
+                            Log.e("RewardManager", "Failed to return to launcher after reward expiration: ${e.message}", e)
+                        }
+
                         // Stop the timer since reward time is 0
                         rewardTimer?.removeCallbacks(this)
                         rewardRunnable = null
