@@ -40,6 +40,9 @@ class RewardTimeReceiver : BroadcastReceiver() {
                 RewardManager.currentRewardMinutes += rewardMinutes
                 RewardManager.saveRewardMinutes(context)
                 
+                // Update start minutes for usage-based tracking
+                RewardManager.updateStartMinutesForNewRewardTime(context, rewardMinutes)
+                
                 // Mark this transaction as processed
                 RewardManager.markTransactionProcessed(context, transactionId)
                 
@@ -59,6 +62,9 @@ class RewardTimeReceiver : BroadcastReceiver() {
                 RewardManager.loadRewardMinutes(context)
                 RewardManager.currentRewardMinutes += rewardMinutes
                 RewardManager.saveRewardMinutes(context)
+                
+                // Update start minutes for usage-based tracking
+                RewardManager.updateStartMinutesForNewRewardTime(context, rewardMinutes)
                 
                 if (RewardManager.currentRewardMinutes > 0) {
                     RewardManager.startRewardTimer(context)

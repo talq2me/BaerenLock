@@ -667,6 +667,9 @@ class LauncherActivity : AppCompatActivity() {
                     RewardManager.currentRewardMinutes += minutes
                     RewardManager.saveRewardMinutes(this)
                     
+                    // Update start minutes for usage-based tracking
+                    RewardManager.updateStartMinutesForNewRewardTime(this, minutes)
+                    
                     // Start timer if not already running
                     if (RewardManager.currentRewardMinutes > 0) {
                         RewardManager.startRewardTimer(this)
@@ -841,6 +844,9 @@ class LauncherActivity : AppCompatActivity() {
             RewardManager.currentRewardMinutes += incomingRewardMinutes
             RewardManager.saveRewardMinutes(this)
             
+            // Update start minutes for usage-based tracking
+            RewardManager.updateStartMinutesForNewRewardTime(this, incomingRewardMinutes)
+            
             // Mark this transaction as processed
             RewardManager.markTransactionProcessed(this, transactionId)
             
@@ -857,6 +863,10 @@ class LauncherActivity : AppCompatActivity() {
             Log.w(TAG, "Received reward minutes without transaction ID (legacy format). Processing anyway.")
             RewardManager.currentRewardMinutes += incomingRewardMinutes
             RewardManager.saveRewardMinutes(this)
+            
+            // Update start minutes for usage-based tracking
+            RewardManager.updateStartMinutesForNewRewardTime(this, incomingRewardMinutes)
+            
             intent.removeExtra("reward_minutes")
             updateRewardMinutesDisplay()
             

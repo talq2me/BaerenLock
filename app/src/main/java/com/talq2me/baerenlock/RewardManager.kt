@@ -25,6 +25,8 @@ object RewardManager {
     private var rewardSessionActive: Boolean = false
     private var lastRewardDecrementTime: Long = 0 // Track when we last decremented reward time
     private var rewardTimeStartTime: Long = 0 // Track when reward time session started
+    private var rewardTimeStartMinutes: Int = 0 // Track how many minutes we started with (for usage-based tracking)
+    private var lastUsageCheckTime: Long = 0 // Track when we last checked usage stats
     
     // Store last reward session data for report generation
     var lastRewardSessions: List<RewardUsageTracker.AppUsageSession>? = null
@@ -391,13 +393,33 @@ object RewardManager {
     }
 
     /**
-     * Resets the reward timer tracking when new reward time is added.
-     * This ensures accurate timing for the new reward time session.
+     * Updates the start minutes when new reward time is added.
+     * This ensures usage-based tracking works correctly when reward time is added mid-session.
      */
-    private fun resetRewardTimerTracking() {
-        lastRewardDecrementTime = 0L
-        rewardTimeStartTime = 0L
-        Log.d("RewardManager", "Reset reward timer tracking for new reward time session")
+    fun updateStartMinutesForNewRewardTime(context: Context, addedMinutes: Int) {
+        if (rewardTimeStartTime > 0 && rewardTimeStartMinutes > 0) {
+            // We're in an active session, adjust the start minutes
+            // Calculate actual usage so far
+            val now = System.currentTimeMillis()
+            val actualUsageMinutes = if (hasUsageStatsPermission(context)) {
+                getActualRewardAppUsageMinutes(context, rewardTimeStartTime, now)
+            } else {
+                // Fallback: estimate based on elapsed time and current minutes
+                rewardTimeStartMinutes - currentRewardMinutes
+            }
+            
+            // Reset start time and adjust start minutes
+            rewardTimeStartTime = now
+            rewardTimeStartMinutes = currentRewardMinutes
+            lastRewardDecrementTime = now
+            lastUsageCheckTime = now
+            
+            Log.d("RewardManager", "Updated start minutes: added $addedMinutes, actual usage was $actualUsageMinutes, new start: $rewardTimeStartMinutes minutes")
+        } else {
+            // No active session, just set the start values
+            rewardTimeStartMinutes = currentRewardMinutes
+            Log.d("RewardManager", "Set start minutes for new session: $rewardTimeStartMinutes minutes")
+        }
     }
 
     /**
@@ -588,8 +610,8 @@ object RewardManager {
 
     /**
      * Starts the reward timer to decrement minutes and update storage.
-     * Only decrements when a reward-eligible app is actually in the foreground.
-     * Checks every 10 seconds to ensure accurate timing even if system is busy.
+     * Uses UsageStatsManager to track actual app usage time for accuracy.
+     * Falls back to timer-based tracking if UsageStats permission is not available.
      */
     fun startRewardTimer(context: Context) {
         Log.d("RewardManager", "startRewardTimer called. Current minutes: $currentRewardMinutes")
@@ -601,7 +623,9 @@ object RewardManager {
         if (isNewSession) {
             lastRewardDecrementTime = currentTime
             rewardTimeStartTime = currentTime
-            Log.d("RewardManager", "Initialized reward timer tracking for new session. Start time: $currentTime")
+            rewardTimeStartMinutes = currentRewardMinutes
+            lastUsageCheckTime = currentTime
+            Log.d("RewardManager", "Initialized reward timer tracking for new session. Start time: $currentTime, Start minutes: $rewardTimeStartMinutes")
         } else {
             Log.d("RewardManager", "Timer already running, continuing existing session. Last decrement: $lastRewardDecrementTime")
         }
@@ -614,33 +638,54 @@ object RewardManager {
             override fun run() {
                 if (currentRewardMinutes > 0) {
                     val now = System.currentTimeMillis()
-                    val timeSinceLastDecrement = now - lastRewardDecrementTime
-                    val oneMinuteInMillis = 60 * 1000L
                     
-                    // Only decrement if a reward app is actually in the foreground
-                    // AND at least 1 minute has elapsed since last decrement
-                    if (isRewardAppInForeground(context)) {
-                        if (timeSinceLastDecrement >= oneMinuteInMillis) {
-                            // Calculate how many full minutes have elapsed
-                            val minutesToDecrement = (timeSinceLastDecrement / oneMinuteInMillis).toInt()
-                            currentRewardMinutes -= minutesToDecrement
-                            if (currentRewardMinutes < 0) currentRewardMinutes = 0
-                            
-                            // Update the last decrement time to account for the time we just decremented
-                            lastRewardDecrementTime += (minutesToDecrement * oneMinuteInMillis)
-                            
+                    // Try to use UsageStatsManager for accurate tracking (if permission available)
+                    if (hasUsageStatsPermission(context)) {
+                        val actualUsageMinutes = getActualRewardAppUsageMinutes(context, rewardTimeStartTime, now)
+                        val expectedMinutesUsed = rewardTimeStartMinutes - currentRewardMinutes
+                        val actualMinutesUsed = actualUsageMinutes
+                        
+                        // Update current minutes based on actual usage
+                        val newCurrentMinutes = rewardTimeStartMinutes - actualMinutesUsed
+                        if (newCurrentMinutes != currentRewardMinutes) {
+                            val difference = currentRewardMinutes - newCurrentMinutes
+                            if (difference > 0) {
+                                Log.d("RewardManager", "UsageStats: Actual usage shows $actualMinutesUsed minutes used (expected: $expectedMinutesUsed). Adjusting from $currentRewardMinutes to $newCurrentMinutes minutes")
+                            }
+                            currentRewardMinutes = newCurrentMinutes.coerceAtLeast(0)
                             saveRewardMinutes(context)
-                            Log.d("RewardManager", "Reward app in foreground - decremented $minutesToDecrement minute(s). Remaining: $currentRewardMinutes minutes")
-                        } else {
-                            // Not enough time has passed yet, but app is in foreground
-                            val secondsRemaining = ((oneMinuteInMillis - timeSinceLastDecrement) / 1000).toInt()
-                            Log.d("RewardManager", "Reward app in foreground - $secondsRemaining seconds until next decrement (remaining: $currentRewardMinutes minutes)")
+                            lastUsageCheckTime = now
                         }
                     } else {
-                        // No reward app in foreground - don't decrement, but update last decrement time
-                        // to prevent accumulating time when app is not in foreground
-                        lastRewardDecrementTime = now
-                        Log.d("RewardManager", "No reward app in foreground - skipping decrement (remaining: $currentRewardMinutes minutes)")
+                        // Fallback to timer-based tracking if UsageStats not available
+                        val timeSinceLastDecrement = now - lastRewardDecrementTime
+                        val oneMinuteInMillis = 60 * 1000L
+                        
+                        // Only decrement if a reward app is actually in the foreground
+                        // AND at least 1 minute has elapsed since last decrement
+                        if (isRewardAppInForeground(context)) {
+                            if (timeSinceLastDecrement >= oneMinuteInMillis) {
+                                // Calculate how many full minutes have elapsed
+                                val minutesToDecrement = (timeSinceLastDecrement / oneMinuteInMillis).toInt()
+                                currentRewardMinutes -= minutesToDecrement
+                                if (currentRewardMinutes < 0) currentRewardMinutes = 0
+                                
+                                // Update the last decrement time to account for the time we just decremented
+                                lastRewardDecrementTime += (minutesToDecrement * oneMinuteInMillis)
+                                
+                                saveRewardMinutes(context)
+                                Log.d("RewardManager", "Reward app in foreground - decremented $minutesToDecrement minute(s). Remaining: $currentRewardMinutes minutes")
+                            } else {
+                                // Not enough time has passed yet, but app is in foreground
+                                val secondsRemaining = ((oneMinuteInMillis - timeSinceLastDecrement) / 1000).toInt()
+                                Log.d("RewardManager", "Reward app in foreground - $secondsRemaining seconds until next decrement (remaining: $currentRewardMinutes minutes)")
+                            }
+                        } else {
+                            // No reward app in foreground - don't decrement, but update last decrement time
+                            // to prevent accumulating time when app is not in foreground
+                            lastRewardDecrementTime = now
+                            Log.d("RewardManager", "No reward app in foreground - skipping decrement (remaining: $currentRewardMinutes minutes)")
+                        }
                     }
 
                     if (currentRewardMinutes == 0) {
@@ -681,6 +726,8 @@ object RewardManager {
                         rewardRunnable = null
                         lastRewardDecrementTime = 0L
                         rewardTimeStartTime = 0L
+                        rewardTimeStartMinutes = 0
+                        lastUsageCheckTime = 0L
                         Log.d("RewardManager", "Reward timer stopped as minutes reached 0.")
                         
                         // Trigger report generation if we have usage data
@@ -689,8 +736,13 @@ object RewardManager {
                         }
 
                     } else {
-                        // Schedule next check in 10 seconds (check frequently for accuracy)
-                        rewardTimer?.postDelayed(this, 10 * 1000L)
+                        // Schedule next check - more frequently if using UsageStats for accuracy
+                        val checkInterval = if (hasUsageStatsPermission(context)) {
+                            5 * 1000L // Check every 5 seconds when using UsageStats
+                        } else {
+                            10 * 1000L // Check every 10 seconds for timer-based fallback
+                        }
+                        rewardTimer?.postDelayed(this, checkInterval)
                     }
                 } else {
                     // No reward time left, stop the timer
@@ -698,6 +750,8 @@ object RewardManager {
                     rewardRunnable = null
                     lastRewardDecrementTime = 0L
                     rewardTimeStartTime = 0L
+                    rewardTimeStartMinutes = 0
+                    lastUsageCheckTime = 0L
                     Log.d("RewardManager", "Reward timer stopped.")
                 }
             }
@@ -706,5 +760,50 @@ object RewardManager {
         // Start the runnable immediately to process the current state and then schedule for future
         rewardTimer?.post(rewardRunnable!!)
         Log.d("RewardManager", "Reward timer initiated. First run scheduled immediately.")
+    }
+
+    /**
+     * Gets the actual usage time (in minutes) for reward-eligible apps using UsageStatsManager.
+     * This provides accurate tracking that isn't affected by timer delays or thread priorities.
+     */
+    private fun getActualRewardAppUsageMinutes(context: Context, startTime: Long, endTime: Long): Int {
+        if (!hasUsageStatsPermission(context)) {
+            return 0
+        }
+        
+        try {
+            val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            var totalUsageMillis = 0L
+            
+            // Query usage stats for each reward-eligible app
+            for (packageName in rewardEligibleApps) {
+                try {
+                    val usageStats = usm.queryUsageStats(
+                        UsageStatsManager.INTERVAL_BEST,
+                        startTime,
+                        endTime
+                    )
+                    
+                    if (usageStats != null) {
+                        for (stat in usageStats) {
+                            if (stat.packageName == packageName) {
+                                totalUsageMillis += stat.totalTimeInForeground
+                                Log.d("RewardManager", "UsageStats for $packageName: ${stat.totalTimeInForeground / 1000} seconds")
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w("RewardManager", "Error querying usage stats for $packageName: ${e.message}")
+                }
+            }
+            
+            // Convert to minutes (round down)
+            val usageMinutes = (totalUsageMillis / (60 * 1000)).toInt()
+            Log.d("RewardManager", "Total actual usage: $usageMinutes minutes (${totalUsageMillis / 1000} seconds)")
+            return usageMinutes
+        } catch (e: Exception) {
+            Log.e("RewardManager", "Error getting actual usage from UsageStatsManager: ${e.message}", e)
+            return 0
+        }
     }
 }
