@@ -614,7 +614,13 @@ object RewardManager {
      * Falls back to timer-based tracking if UsageStats permission is not available.
      */
     fun startRewardTimer(context: Context) {
-        Log.d("RewardManager", "startRewardTimer called. Current minutes: $currentRewardMinutes")
+        Log.d("RewardManager", "startRewardTimer called. Current minutes: $currentRewardMinutes, timer already running: ${rewardRunnable != null}")
+        
+        // If timer is already running and we have reward minutes, don't restart it
+        if (rewardRunnable != null && currentRewardMinutes > 0) {
+            Log.d("RewardManager", "Timer already running with $currentRewardMinutes minutes, skipping restart")
+            return
+        }
         
         // Initialize timing tracking if this is a new session (timer not running)
         val currentTime = System.currentTimeMillis()
@@ -653,12 +659,21 @@ object RewardManager {
                             
                             Log.d("RewardManager", "UsageStats check: timeSinceStart=${timeSinceStart/1000}s, actualUsage=$actualMinutesUsed min, expected=$expectedMinutesUsed min, current=$currentRewardMinutes min, start=$rewardTimeStartMinutes min")
                             
-                            // Update current minutes based on actual usage
-                            val newCurrentMinutes = rewardTimeStartMinutes - actualMinutesUsed
+                            // Safety check: Don't allow UsageStats to reduce minutes more than the time that has actually passed
+                            // This prevents historical usage data from incorrectly reducing minutes
+                            val maxPossibleUsageMinutes = ((timeSinceStart / (60 * 1000L)) + 1).toInt() // Round up to be safe
+                            val safeActualUsage = actualMinutesUsed.coerceAtMost(maxPossibleUsageMinutes)
+                            
+                            if (actualMinutesUsed > maxPossibleUsageMinutes) {
+                                Log.w("RewardManager", "UsageStats returned $actualMinutesUsed minutes but only ${timeSinceStart/1000}s (${maxPossibleUsageMinutes} max) have passed. Using safe value: $safeActualUsage")
+                            }
+                            
+                            // Update current minutes based on actual usage (using safe value)
+                            val newCurrentMinutes = rewardTimeStartMinutes - safeActualUsage
                             if (newCurrentMinutes != currentRewardMinutes) {
                                 val difference = currentRewardMinutes - newCurrentMinutes
                                 if (difference > 0) {
-                                    Log.d("RewardManager", "UsageStats: Actual usage shows $actualMinutesUsed minutes used (expected: $expectedMinutesUsed). Adjusting from $currentRewardMinutes to $newCurrentMinutes minutes")
+                                    Log.d("RewardManager", "UsageStats: Actual usage shows $safeActualUsage minutes used (expected: $expectedMinutesUsed). Adjusting from $currentRewardMinutes to $newCurrentMinutes minutes")
                                 }
                                 currentRewardMinutes = newCurrentMinutes.coerceAtLeast(0)
                                 saveRewardMinutes(context)
