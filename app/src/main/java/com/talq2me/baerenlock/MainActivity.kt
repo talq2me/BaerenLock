@@ -245,6 +245,24 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 sendUsageReport()
             }, 1000) // Small delay to ensure everything is loaded
         }
+        
+        // Check if this is a trigger to upload reward report
+        if (intent.getBooleanExtra("trigger_report_upload", false)) {
+            Log.d(TAG, "MainActivity started with trigger_report_upload flag")
+            Handler(Looper.getMainLooper()).postDelayed({
+                // Check if we have usage data to upload
+                val sessions = RewardManager.lastRewardSessions
+                val summary = RewardManager.lastRewardSummary
+                if (sessions != null && summary != null) {
+                    Log.d(TAG, "Uploading reward report from triggered MainActivity start")
+                    generateAndUploadRewardReport(sessions, summary)
+                    RewardManager.lastRewardSessions = null
+                    RewardManager.lastRewardSummary = null
+                } else {
+                    Log.d(TAG, "No usage data available yet, waiting for broadcast")
+                }
+            }, 1000) // Small delay to ensure receiver is registered
+        }
 
         // Init TTS and permissions
         tts = TextToSpeech(this, this)
@@ -263,16 +281,24 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     
     private val rewardReportReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(TAG, "rewardReportReceiver.onReceive called with action: ${intent?.action}")
             if (intent?.action == "com.talq2me.baerenlock.ACTION_GENERATE_REWARD_REPORT") {
+                Log.d(TAG, "Received ACTION_GENERATE_REWARD_REPORT broadcast")
                 // Get usage data from RewardManager
                 val sessions = RewardManager.lastRewardSessions
                 val summary = RewardManager.lastRewardSummary
                 
+                Log.d(TAG, "Usage data check: sessions=${sessions != null} (${sessions?.size ?: 0} sessions), summary=${summary != null}")
+                
                 if (sessions != null && summary != null) {
+                    Log.d(TAG, "Generating and uploading reward report with ${sessions.size} sessions")
                     generateAndUploadRewardReport(sessions, summary)
                     // Clear the stored data
                     RewardManager.lastRewardSessions = null
                     RewardManager.lastRewardSummary = null
+                    Log.d(TAG, "Cleared stored usage data after upload")
+                } else {
+                    Log.w(TAG, "Cannot generate report: sessions or summary is null")
                 }
             }
         }
@@ -281,6 +307,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun registerRewardReportReceiver() {
         val filter = IntentFilter("com.talq2me.baerenlock.ACTION_GENERATE_REWARD_REPORT")
         LocalBroadcastManager.getInstance(this).registerReceiver(rewardReportReceiver, filter)
+        Log.d(TAG, "Registered reward report receiver with LocalBroadcastManager")
     }
 
     private fun registerUpdateReceiver() {
@@ -813,17 +840,22 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         sessions: List<RewardUsageTracker.AppUsageSession>,
         summary: RewardUsageTracker.RewardSessionSummary
     ) {
+        Log.d(TAG, "generateAndUploadRewardReport called with ${sessions.size} sessions, total time: ${summary.totalTimeSeconds}s")
+        
         // Get child name from settings (or use default)
         val settingsPrefs = getSharedPreferences("settings", MODE_PRIVATE)
         val childName = settingsPrefs.getString("child_name", "Child") ?: "Child"
+        Log.d(TAG, "Child name: $childName")
         
         // Get profile (A or B) to determine filename
         val profile = readProfile()
         val profilePrefix = if (profile == "A") "AM" else "BM"
+        Log.d(TAG, "Profile: $profile, prefix: $profilePrefix")
         
         // Generate report section (for appending)
         val reportGenerator = RewardReportGenerator()
         val reportSection = reportGenerator.generateReportSection(sessions, summary, childName)
+        Log.d(TAG, "Generated report section (${reportSection.length} chars)")
         
         // Upload to GitHub (with append logic)
         uploadReportToGitHub(reportSection, profilePrefix)
@@ -909,14 +941,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         reportSection: String,
         profilePrefix: String
     ) {
+        Log.d(TAG, "uploadReportToGitHub called for profile: $profilePrefix")
+        
         // Decrypt GitHub token at runtime (encrypted token and key stored in BuildConfig)
         val githubToken = decryptGitHubToken()
         
         // Check if GitHub token is configured
         if (githubToken.isBlank()) {
             Log.w(TAG, "GitHub token not configured - skipping upload")
+            Toast.makeText(this, "GitHub token not configured - report not uploaded", Toast.LENGTH_LONG).show()
             return
         }
+        
+        Log.d(TAG, "GitHub token decrypted successfully, proceeding with upload")
         
         // Show progress (optional, for feedback)
         val progressDialog = AlertDialog.Builder(this)

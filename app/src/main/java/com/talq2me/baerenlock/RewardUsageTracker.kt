@@ -111,6 +111,13 @@ class RewardUsageTracker(private val context: Context) {
         sessions.forEach { it.updateDuration() }
         
         Log.d(TAG, "Ended reward session. Total apps tracked: ${sessions.size}")
+        if (sessions.isEmpty()) {
+            Log.w(TAG, "No app usage sessions were tracked during reward time")
+        } else {
+            sessions.forEach { session ->
+                Log.d(TAG, "  Session: ${session.appName} (${session.packageName}) - ${session.formattedDuration}")
+            }
+        }
         return sessions.toList()
     }
     
@@ -144,6 +151,8 @@ class RewardUsageTracker(private val context: Context) {
             .mapValues { (_, sessions) -> sessions.sumOf { it.durationSeconds } }
             .toList()
             .sortedByDescending { it.second }
+        
+        Log.d(TAG, "Session summary: ${allSessions.size} total sessions, ${totalTimeSeconds}s total time, ${appUsageMap.size} unique apps")
         
         return RewardSessionSummary(
             startTime = rewardStartTime ?: 0L,

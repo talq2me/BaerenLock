@@ -475,6 +475,7 @@ object RewardManager {
             // Track app usage if reward session is active
             if (rewardSessionActive && currentRewardMinutes > 0) {
                 usageTracker?.onAppForeground(packageName)
+                Log.d("RewardManager", "Tracking foreground app during reward time: $packageName")
             }
         }
     }
@@ -488,6 +489,8 @@ object RewardManager {
             usageTracker?.startRewardSession()
             rewardSessionActive = true
             Log.d("RewardManager", "Started reward session tracking")
+        } else {
+            Log.d("RewardManager", "Reward session tracking already active, skipping start")
         }
     }
     
@@ -495,9 +498,15 @@ object RewardManager {
      * Ends reward session tracking and returns the usage data
      */
     fun endRewardSessionTracking(): Pair<List<RewardUsageTracker.AppUsageSession>, RewardUsageTracker.RewardSessionSummary>? {
+        Log.d("RewardManager", "endRewardSessionTracking called. rewardSessionActive=$rewardSessionActive, usageTracker=${usageTracker != null}")
         if (rewardSessionActive && usageTracker != null) {
             val sessions = usageTracker!!.endRewardSession()
             val summary = usageTracker!!.getSessionSummary()
+            
+            Log.d("RewardManager", "Ended reward session. Sessions: ${sessions.size}, Total time: ${summary.totalTimeSeconds}s, Unique apps: ${summary.uniqueApps}")
+            sessions.forEach { session ->
+                Log.d("RewardManager", "  - ${session.appName} (${session.packageName}): ${session.formattedDuration}")
+            }
             
             // Store for report generation
             lastRewardSessions = sessions
@@ -505,8 +514,10 @@ object RewardManager {
             
             rewardSessionActive = false
             usageTracker = null
-            Log.d("RewardManager", "Ended reward session tracking. Sessions: ${sessions.size}")
+            Log.d("RewardManager", "Stored usage data in lastRewardSessions and lastRewardSummary")
             return Pair(sessions, summary)
+        } else {
+            Log.w("RewardManager", "Cannot end reward session tracking: rewardSessionActive=$rewardSessionActive, usageTracker=${usageTracker != null}")
         }
         return null
     }
@@ -724,6 +735,8 @@ object RewardManager {
 
                         // End reward session tracking and send broadcast with usage data
                         val usageData = endRewardSessionTracking()
+                        Log.d("RewardManager", "Reward time expired. Usage data: ${if (usageData != null) "available (${usageData.first.size} sessions)" else "null"}")
+                        
                         val intent = Intent(LauncherActivity.ACTION_REWARD_EXPIRED).apply {
                             putExtra("has_usage_data", usageData != null)
                         }
@@ -732,9 +745,25 @@ object RewardManager {
                         
                         // Also send a separate broadcast for report generation
                         if (usageData != null) {
+                            Log.d("RewardManager", "Usage data available: ${usageData.first.size} sessions, total time: ${usageData.second.totalTimeSeconds}s")
                             val reportIntent = Intent("com.talq2me.baerenlock.ACTION_GENERATE_REWARD_REPORT")
                             androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(context).sendBroadcast(reportIntent)
-                            Log.d("RewardManager", "Sent ACTION_GENERATE_REWARD_REPORT broadcast.")
+                            Log.d("RewardManager", "Sent ACTION_GENERATE_REWARD_REPORT broadcast via LocalBroadcastManager")
+                            
+                            // Also start MainActivity to ensure it's running to receive the broadcast
+                            // This is a fallback in case MainActivity isn't running
+                            try {
+                                val mainActivityIntent = Intent(context, com.talq2me.baerenlock.MainActivity::class.java).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                    putExtra("trigger_report_upload", true)
+                                }
+                                context.startActivity(mainActivityIntent)
+                                Log.d("RewardManager", "Started MainActivity to ensure report upload can happen")
+                            } catch (e: Exception) {
+                                Log.e("RewardManager", "Failed to start MainActivity for report upload: ${e.message}", e)
+                            }
+                        } else {
+                            Log.w("RewardManager", "No usage data available - skipping report generation")
                         }
 
                         // Kill reward-eligible apps that were granted access
