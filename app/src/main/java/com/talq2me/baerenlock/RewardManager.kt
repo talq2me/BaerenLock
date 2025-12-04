@@ -643,6 +643,9 @@ object RewardManager {
             rewardTimeStartMinutes = currentRewardMinutes
             lastUsageCheckTime = currentTime
             Log.d("RewardManager", "Initialized reward timer tracking for new session. Start time: $currentTime, Start minutes: $rewardTimeStartMinutes")
+            
+            // Start reward session tracking for usage reporting
+            startRewardSessionTracking(context)
         } else {
             Log.d("RewardManager", "Timer already running, continuing existing session. Last decrement: $lastRewardDecrementTime")
         }
