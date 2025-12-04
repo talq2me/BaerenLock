@@ -47,6 +47,7 @@ import kotlinx.coroutines.*
 import android.os.Build
 import androidx.lifecycle.lifecycleScope
 import java.util.Calendar
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -279,12 +280,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     
     private fun registerRewardReportReceiver() {
         val filter = IntentFilter("com.talq2me.baerenlock.ACTION_GENERATE_REWARD_REPORT")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(rewardReportReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(rewardReportReceiver, filter)
-        }
+        LocalBroadcastManager.getInstance(this).registerReceiver(rewardReportReceiver, filter)
     }
 
     private fun registerUpdateReceiver() {
@@ -527,7 +523,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             Log.w("MainActivity", "Receiver already unregistered")
         }
         try {
-            unregisterReceiver(rewardReportReceiver)
+            LocalBroadcastManager.getInstance(this).unregisterReceiver(rewardReportReceiver)
         } catch (e: IllegalArgumentException) {
             Log.w("MainActivity", "Reward report receiver already unregistered")
         }
