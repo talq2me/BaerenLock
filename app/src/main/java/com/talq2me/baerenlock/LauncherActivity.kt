@@ -2,7 +2,6 @@ package com.talq2me.baerenlock
 
 import android.content.BroadcastReceiver
 import android.content.ComponentName
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -24,7 +23,6 @@ import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
-import com.talq2me.contract.SettingsContract
 
 class LauncherActivity : AppCompatActivity() {
 
@@ -56,6 +54,8 @@ class LauncherActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Preload settings from Supabase on startup
+        SettingsManager.preloadSettings(this)
 
         prefs = getSharedPreferences("com.talq2me.baerenlock.prefs", Context.MODE_PRIVATE)
 
@@ -207,6 +207,9 @@ class LauncherActivity : AppCompatActivity() {
         refreshIcons(appGrid)
         updateAccessibilityBanner(appGrid.parent as ViewGroup)
 
+        // Download user_data from cloud for current profile (to get accurate reward minutes)
+        SettingsManager.downloadUserDataFromCloud(this)
+        
         RewardManager.loadRewardMinutes(this)
         if (RewardManager.currentRewardMinutes > 0) {
             RewardManager.startRewardTimer(this)
@@ -367,27 +370,11 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun readProfile(): String? {
-        try {
-            contentResolver.query(SettingsContract.CONTENT_URI, arrayOf(SettingsContract.KEY_PROFILE), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    return cursor.getString(cursor.getColumnIndexOrThrow(SettingsContract.KEY_PROFILE))
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read profile from provider.", e)
-        }
-        return null
+        return SettingsManager.readProfile(this)
     }
 
     private fun writeProfile(newProfile: String) {
-        val values = ContentValues().apply {
-            put(SettingsContract.KEY_PROFILE, newProfile)
-        }
-        try {
-            contentResolver.update(SettingsContract.CONTENT_URI, values, null, null)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to write profile to provider.", e)
-        }
+        SettingsManager.writeProfile(this, newProfile)
     }
 
     private fun getOrCreateProfile(): String? {
@@ -408,51 +395,19 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun readPin(): String? {
-        try {
-            contentResolver.query(SettingsContract.CONTENT_URI, arrayOf(SettingsContract.KEY_PIN), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    return cursor.getString(cursor.getColumnIndexOrThrow(SettingsContract.KEY_PIN))
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read PIN from provider.", e)
-        }
-        return null
+        return SettingsManager.readPin(this)
     }
 
     private fun writePin(newPin: String) {
-        val values = ContentValues().apply {
-            put(SettingsContract.KEY_PIN, newPin)
-        }
-        try {
-            contentResolver.update(SettingsContract.CONTENT_URI, values, null, null)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to write PIN to provider.", e)
-        }
+        SettingsManager.writePin(this, newPin)
     }
 
     private fun readEmail(): String? {
-        try {
-            contentResolver.query(SettingsContract.CONTENT_URI, arrayOf(SettingsContract.KEY_PARENT_EMAIL), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    return cursor.getString(cursor.getColumnIndexOrThrow(SettingsContract.KEY_PARENT_EMAIL))
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read email from provider.", e)
-        }
-        return null
+        return SettingsManager.readEmail(this)
     }
 
     private fun writeEmail(newEmail: String) {
-        val values = ContentValues().apply {
-            put(SettingsContract.KEY_PARENT_EMAIL, newEmail)
-        }
-        try {
-            contentResolver.update(SettingsContract.CONTENT_URI, values, null, null)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to write email to provider.", e)
-        }
+        SettingsManager.writeEmail(this, newEmail)
     }
 
     private fun refreshIcons(container: ViewGroup) {
@@ -560,6 +515,10 @@ class LauncherActivity : AppCompatActivity() {
                 val selectedProfile = if (which == 0) "A" else "B"
                 if (currentProfile != selectedProfile) {
                     writeProfile(selectedProfile)
+                    // Download user_data from cloud for the new profile
+                    SettingsManager.downloadUserDataFromCloud(this)
+                    // Reload reward minutes after profile change
+                    RewardManager.loadRewardMinutes(this)
                     finishAffinity()
                     startActivity(Intent(this, LauncherActivity::class.java))
                 }

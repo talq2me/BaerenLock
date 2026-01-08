@@ -111,10 +111,9 @@ class BlackListSettingsActivity : AppCompatActivity() {
                         if (RewardManager.rewardEligibleApps.contains(pkg)) {
                             RewardManager.rewardEligibleApps.remove(pkg)
                             // Save reward apps
-                            val rewardPrefs = getSharedPreferences("settings", MODE_PRIVATE)
-                            val currentRewardApps = rewardPrefs.getStringSet("reward_apps", emptySet())?.toMutableSet() ?: mutableSetOf()
+                            val currentRewardApps = SettingsManager.readRewardApps(this@BlackListSettingsActivity).toMutableSet()
                             currentRewardApps.remove(pkg)
-                            rewardPrefs.edit().putStringSet("reward_apps", currentRewardApps).apply()
+                            SettingsManager.writeRewardApps(this@BlackListSettingsActivity, currentRewardApps)
                             RewardManager.refreshRewardEligibleApps(this@BlackListSettingsActivity)
                             Log.d(TAG, "Removed $pkg from reward list (now blacklisted)")
                         }
@@ -153,6 +152,8 @@ class BlackListSettingsActivity : AppCompatActivity() {
         blacklist.add(pkgName)
         prefs.edit().putStringSet("packages", blacklist).apply()
         Log.d(TAG, "Added $pkgName to blacklist")
+        // Sync to cloud
+        SettingsManager.syncAppListsToCloudAsync(this)
     }
 
     private fun removeFromBlacklist(pkgName: String) {
@@ -161,11 +162,15 @@ class BlackListSettingsActivity : AppCompatActivity() {
         blacklist.remove(pkgName)
         prefs.edit().putStringSet("packages", blacklist).apply()
         Log.d(TAG, "Removed $pkgName from blacklist")
+        // Sync to cloud
+        SettingsManager.syncAppListsToCloudAsync(this)
     }
     
     private fun clearAllBlacklist() {
         val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
         prefs.edit().remove("packages").apply()
         Log.d(TAG, "Cleared all blacklist entries")
+        // Sync to cloud
+        SettingsManager.syncAppListsToCloudAsync(this)
     }
 }

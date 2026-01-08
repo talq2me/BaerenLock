@@ -47,8 +47,7 @@ class ChangePinActivity : AppCompatActivity() {
     private fun showConfirmPinPrompt() {
         PinPromptDialog.show(this, "Confirm new PIN") { pin ->
             if (pin == newPin) {
-                val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
-                prefs.edit().putString("parent_pin", newPin).apply()
+                SettingsManager.writePin(this, newPin)
                 Toast.makeText(this, "PIN changed successfully", Toast.LENGTH_SHORT).show()
                 finish()
             } else {

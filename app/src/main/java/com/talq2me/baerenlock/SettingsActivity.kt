@@ -1,7 +1,6 @@
 package com.talq2me.baerenlock
 
 import android.content.Intent
-import android.content.SharedPreferences
 import android.os.Bundle
 import android.util.Log
 import android.widget.*
@@ -9,12 +8,8 @@ import androidx.appcompat.app.AppCompatActivity
 
 class SettingsActivity : AppCompatActivity() {
 
-    private lateinit var prefs: SharedPreferences
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        prefs = getSharedPreferences("settings", MODE_PRIVATE)
 
         // Create UI programmatically
         val scrollView = ScrollView(this)
@@ -44,7 +39,7 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         // Load current email
-        val currentEmail = prefs.getString("parent_email", "")
+        val currentEmail = SettingsManager.readEmail(this) ?: ""
         emailInput.setText(currentEmail)
 
         mainLayout.addView(emailInput)
@@ -54,7 +49,7 @@ class SettingsActivity : AppCompatActivity() {
             setOnClickListener {
                 val email = emailInput.text.toString().trim()
                 if (email.isNotEmpty() && android.util.Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
-                    prefs.edit().putString("parent_email", email).apply()
+                    SettingsManager.writeEmail(this@SettingsActivity, email)
                     Toast.makeText(this@SettingsActivity, "Email saved successfully", Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(this@SettingsActivity, "Please enter a valid email address", Toast.LENGTH_SHORT).show()
@@ -69,9 +64,9 @@ class SettingsActivity : AppCompatActivity() {
         val memoryCleanupSwitch = Switch(this).apply {
             text = "Aggressive Background App Cleanup"
             textSize = 16f
-            isChecked = prefs.getBoolean("aggressive_cleanup", true)
+            isChecked = SettingsManager.readAggressiveCleanup(this@SettingsActivity)
             setOnCheckedChangeListener { _, isChecked ->
-                prefs.edit().putBoolean("aggressive_cleanup", isChecked).apply()
+                SettingsManager.writeAggressiveCleanup(this@SettingsActivity, isChecked)
                 val status = if (isChecked) "enabled" else "disabled"
                 Toast.makeText(this@SettingsActivity, "Background cleanup $status", Toast.LENGTH_SHORT).show()
                 Log.d("SettingsActivity", "Aggressive cleanup $status")

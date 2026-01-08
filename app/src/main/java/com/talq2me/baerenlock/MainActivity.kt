@@ -32,7 +32,6 @@ import android.os.Environment
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.FileProvider
 import com.talq2me.baerenlock.DevicePolicyManager as CustomDevicePolicyManager
-import com.talq2me.contract.SettingsContract
 import java.io.File
 import org.json.JSONObject
 import java.net.URL
@@ -84,10 +83,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             
             Thread {
                 try {
-                    // Check for internet first
-                    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-                    val network = cm.activeNetwork
-                    if (network == null) {
+                    // Check for internet first (wrap in try-catch in case permission is missing)
+                    var hasNetwork = false
+                    try {
+                        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                        val network = cm.activeNetwork
+                        hasNetwork = network != null
+                    } catch (e: SecurityException) {
+                        Log.w("MainActivity", "Missing ACCESS_NETWORK_STATE permission, skipping network check: ${e.message}")
+                        // Continue anyway - try to download and see if it works
+                        hasNetwork = true // Assume network is available and try the download
+                    }
+                    
+                    if (!hasNetwork) {
                         Log.d("MainActivity", "No internet — skipping update check.")
                         return@Thread
                     }
@@ -204,6 +212,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Preload settings from Supabase on startup
+        SettingsManager.preloadSettings(this)
 
         checkForUpdate(this)
 
@@ -217,6 +227,68 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             } else {
                 Toast.makeText(this, "Overlay permission denied", Toast.LENGTH_SHORT).show()
             }
+        }
+
+        // Check if this is a trigger to upload reward report FIRST, before doing anything else
+        val isTriggerReportUpload = intent.getBooleanExtra("trigger_report_upload", false)
+        
+        if (isTriggerReportUpload) {
+            Log.d(TAG, "MainActivity started with trigger_report_upload flag - will upload report")
+            // Set up minimal UI to keep activity alive during upload
+            // Use a simple TextView instead of WebView
+            val textView = TextView(this).apply {
+                text = "Uploading report..."
+                textSize = 18f
+                gravity = android.view.Gravity.CENTER
+            }
+            setContentView(textView)
+            
+            // Register receiver first so we can catch the broadcast if it comes
+            registerRewardReportReceiver()
+            
+            // Don't launch BaerenEd or do normal setup - just handle the upload
+            Handler(Looper.getMainLooper()).postDelayed({
+                // Check if we have usage data to upload
+                val sessions = RewardManager.lastRewardSessions
+                val summary = RewardManager.lastRewardSummary
+                Log.d(TAG, "Checking for usage data: sessions=${sessions != null} (${sessions?.size ?: 0}), summary=${summary != null}")
+                if (sessions != null && summary != null) {
+                    Log.d(TAG, "Uploading reward report from triggered MainActivity start")
+                    textView.text = "Uploading report to GitHub..."
+                    generateAndUploadRewardReport(sessions, summary)
+                    RewardManager.lastRewardSessions = null
+                    RewardManager.lastRewardSummary = null
+                    // Finish activity after a short delay to allow upload to complete
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        finish()
+                    }, 3000)
+                } else {
+                    Log.w(TAG, "No usage data available yet, waiting for broadcast or retry")
+                    textView.text = "Waiting for usage data..."
+                    // Wait a bit more in case data is still being stored or broadcast is coming
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        val retrySessions = RewardManager.lastRewardSessions
+                        val retrySummary = RewardManager.lastRewardSummary
+                        if (retrySessions != null && retrySummary != null) {
+                            Log.d(TAG, "Found usage data on retry, uploading now")
+                            textView.text = "Uploading report to GitHub..."
+                            generateAndUploadRewardReport(retrySessions, retrySummary)
+                            RewardManager.lastRewardSessions = null
+                            RewardManager.lastRewardSummary = null
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                finish()
+                            }, 3000)
+                        } else {
+                            Log.e(TAG, "Still no usage data after retry - report upload will not happen")
+                            textView.text = "No usage data found"
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                finish()
+                            }, 2000)
+                        }
+                    }, 2000) // Wait 2 more seconds
+                }
+            }, 500) // Small delay to ensure receiver is registered
+            return // Don't continue with normal MainActivity flow
         }
 
         // Load persistent whitelist
@@ -244,24 +316,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             Handler(Looper.getMainLooper()).postDelayed({
                 sendUsageReport()
             }, 1000) // Small delay to ensure everything is loaded
-        }
-        
-        // Check if this is a trigger to upload reward report
-        if (intent.getBooleanExtra("trigger_report_upload", false)) {
-            Log.d(TAG, "MainActivity started with trigger_report_upload flag")
-            Handler(Looper.getMainLooper()).postDelayed({
-                // Check if we have usage data to upload
-                val sessions = RewardManager.lastRewardSessions
-                val summary = RewardManager.lastRewardSummary
-                if (sessions != null && summary != null) {
-                    Log.d(TAG, "Uploading reward report from triggered MainActivity start")
-                    generateAndUploadRewardReport(sessions, summary)
-                    RewardManager.lastRewardSessions = null
-                    RewardManager.lastRewardSummary = null
-                } else {
-                    Log.d(TAG, "No usage data available yet, waiting for broadcast")
-                }
-            }, 1000) // Small delay to ensure receiver is registered
         }
 
         // Init TTS and permissions
@@ -573,8 +627,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val allData = prefs.all
 
         // Get parent email from settings
-        val settingsPrefs = getSharedPreferences("settings", MODE_PRIVATE)
-        val parentEmail = settingsPrefs.getString("parent_email", null)
+        val parentEmail = SettingsManager.readEmail(this)
         
         if (parentEmail.isNullOrBlank()) {
             Toast.makeText(this, "Please set parent email in settings first", Toast.LENGTH_LONG).show()
@@ -678,8 +731,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun showRewardAppPicker(minutes: Int) {
         Log.d("MainActivity", "showRewardAppPicker called with $minutes minutes")
         
-        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        val rewardApps = prefs.getStringSet("reward_apps", emptySet())?.toList() ?: emptyList()
+        val rewardApps = SettingsManager.readRewardApps(this).toList()
         Log.d("MainActivity", "Found ${rewardApps.size} reward apps configured")
         
         if (rewardApps.isEmpty()) {
@@ -794,8 +846,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     fun showPinPrompt(onPinEntered: (String) -> Unit) {
-        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        val storedPin = prefs.getString("parent_pin", "1234") ?: "1234"
+        val storedPin = SettingsManager.readPin(this) ?: "1234"
         PinPromptDialog.show(this, "Enter PIN") { enteredPin ->
             if (enteredPin == storedPin) {
                 onPinEntered(enteredPin)
@@ -843,8 +894,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         Log.d(TAG, "generateAndUploadRewardReport called with ${sessions.size} sessions, total time: ${summary.totalTimeSeconds}s")
         
         // Get child name from settings (or use default)
-        val settingsPrefs = getSharedPreferences("settings", MODE_PRIVATE)
-        val childName = settingsPrefs.getString("child_name", "Child") ?: "Child"
+        val childName = SettingsManager.readChildName(this) ?: "Child"
         Log.d(TAG, "Child name: $childName")
         
         // Get profile (A or B) to determine filename
@@ -862,21 +912,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
     
     /**
-     * Reads the current profile (A or B) from SettingsContract
+     * Reads the current profile (A or B) from Supabase
      */
     private fun readProfile(): String {
-        return try {
-            contentResolver.query(SettingsContract.CONTENT_URI, arrayOf(SettingsContract.KEY_PROFILE), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    cursor.getString(cursor.getColumnIndexOrThrow(SettingsContract.KEY_PROFILE)) ?: "A"
-                } else {
-                    "A" // Default to A if no profile set
-                }
-            } ?: "A"
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read profile from provider, defaulting to A", e)
-            "A" // Default to A on error
-        }
+        return SettingsManager.readProfile(this) ?: "A"
     }
     
     /**

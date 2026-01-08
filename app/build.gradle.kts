@@ -25,8 +25,8 @@ android {
         applicationId = "com.talq2me.baerenlock"
         minSdk = 28
         targetSdk = 35
-        versionCode = 33
-        versionName = "33"
+        versionCode = 34
+        versionName = "34"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         
@@ -35,6 +35,13 @@ android {
         // The decryption key is hardcoded in MainActivity.kt (safe to commit - it's just a key)
         val encryptedToken = getLocalProperty("ENCRYPTED_GITHUB_TOKEN", "")
         buildConfigField("String", "ENCRYPTED_GITHUB_TOKEN", "\"$encryptedToken\"")
+        
+        // Read Supabase configuration from local.properties
+        // These will be embedded in the app at build time
+        val supabaseUrl = getLocalProperty("SUPABASE_URL", "")
+        val supabaseKey = getLocalProperty("SUPABASE_KEY", "")
+        buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
+        buildConfigField("String", "SUPABASE_KEY", "\"$supabaseKey\"")
     }
     
     buildFeatures {
@@ -80,8 +87,9 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
-    implementation("com.talq2me.baeren:settings-contract:1.0.0")
     implementation("com.squareup.okhttp3:okhttp:4.11.0")
+    implementation("com.google.code.gson:gson:2.10.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.mockito:mockito-core:5.11.0")
     testImplementation("org.mockito.kotlin:mockito-kotlin:5.2.1")

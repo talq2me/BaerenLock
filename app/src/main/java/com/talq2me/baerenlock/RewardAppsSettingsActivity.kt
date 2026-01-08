@@ -22,8 +22,7 @@ class RewardAppsSettingsActivity : AppCompatActivity() {
         // Set up the OnBackPressedCallback
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-                prefs.edit().putStringSet("reward_apps", selectedPackages).apply()
+                SettingsManager.writeRewardApps(this@RewardAppsSettingsActivity, selectedPackages)
                 RewardManager.refreshRewardEligibleApps(this@RewardAppsSettingsActivity) // Refresh RewardManager
                 Toast.makeText(this@RewardAppsSettingsActivity, "Reward apps saved", Toast.LENGTH_SHORT).show()
                 finish()
@@ -47,8 +46,7 @@ class RewardAppsSettingsActivity : AppCompatActivity() {
     private fun loadApps() {
         val pm = packageManager
         val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
-        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        val saved = prefs.getStringSet("reward_apps", emptySet()) ?: emptySet()
+        val saved = SettingsManager.readRewardApps(this)
         appLabels.clear()
         appPackages.clear()
         selectedPackages.clear()

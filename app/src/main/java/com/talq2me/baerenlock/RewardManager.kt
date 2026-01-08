@@ -135,6 +135,8 @@ object RewardManager {
         // Only save permanent apps, not temporary reward apps
         val permanentApps = allowedApps.filter { !temporaryApps.contains(it) }.toSet()
         prefs.edit().putStringSet("allowed", permanentApps).apply()
+        // Sync to cloud
+        SettingsManager.syncAppListsToCloudAsync(context)
     }
 
     fun loadAllowedApps(context: Context) {
@@ -157,8 +159,7 @@ object RewardManager {
         }
 
         // Load user-configured reward-eligible apps
-        val rewardPrefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-        val savedRewardApps = rewardPrefs.getStringSet("reward_apps", emptySet()) ?: emptySet()
+        val savedRewardApps = SettingsManager.readRewardApps(context)
         rewardEligibleApps.clear()
         rewardEligibleApps.addAll(savedRewardApps)
         Log.d("RewardManager", "Loaded reward eligible apps: $rewardEligibleApps")
@@ -176,8 +177,7 @@ object RewardManager {
     fun killUnauthorizedBackgroundApps(context: Context) {
         try {
             // Check if aggressive cleanup is enabled
-            val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            val aggressiveCleanup = prefs.getBoolean("aggressive_cleanup", true)
+            val aggressiveCleanup = SettingsManager.readAggressiveCleanup(context)
 
             if (!aggressiveCleanup) {
                 Log.d("RewardManager", "Aggressive cleanup disabled, skipping background app cleanup")
@@ -249,8 +249,7 @@ object RewardManager {
     fun killUnauthorizedBackgroundAppsWithCount(context: Context): Int {
         try {
             // Check if aggressive cleanup is enabled
-            val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            val aggressiveCleanup = prefs.getBoolean("aggressive_cleanup", true)
+            val aggressiveCleanup = SettingsManager.readAggressiveCleanup(context)
 
             if (!aggressiveCleanup) {
                 Log.d("RewardManager", "Aggressive cleanup disabled, skipping background app cleanup")
@@ -330,8 +329,7 @@ object RewardManager {
     }
 
     fun refreshRewardEligibleApps(context: Context) {
-        val rewardPrefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-        val savedRewardApps = rewardPrefs.getStringSet("reward_apps", emptySet()) ?: emptySet()
+        val savedRewardApps = SettingsManager.readRewardApps(context)
         val oldRewardApps = rewardEligibleApps.toSet()
         rewardEligibleApps.clear()
         rewardEligibleApps.addAll(savedRewardApps)
@@ -360,6 +358,19 @@ object RewardManager {
         editor.putLong("last_reward_date", today)
         editor.apply()
         Log.d("RewardManager", "Saved reward minutes to SharedPreferences: $currentRewardMinutes, date: $today")
+        
+        // Sync to cloud database to keep it accurate
+        syncRewardMinutesToCloud(context)
+    }
+    
+    /**
+     * Syncs current reward minutes to cloud user_data table
+     * This ensures that if we sync from cloud, we get the accurate remaining reward time
+     */
+    private fun syncRewardMinutesToCloud(context: Context) {
+        Log.d("RewardManager", "Syncing $currentRewardMinutes reward minutes to cloud...")
+        // Use SettingsManager's coroutine scope to sync asynchronously
+        com.talq2me.baerenlock.SettingsManager.syncRewardMinutesToCloudAsync(context, currentRewardMinutes)
     }
 
     fun loadRewardMinutes(context: Context) {
