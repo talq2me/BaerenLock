@@ -949,10 +949,12 @@ object SettingsManager {
                         var shouldSyncLocalToCloud: Boolean
                         
                         if (localBankedMinsTimestamp.isNullOrEmpty() && currentLocalBankedMins == 0) {
-                            // No local timestamp and local is 0 - fresh install/reset, apply cloud value
-                            bankedMinsToApply = cloudBankedMins
-                            shouldSyncLocalToCloud = false
-                            Log.d(TAG, "Applying cloud banked_mins ($cloudBankedMins) - no local timestamp, local is 0 (fresh install/reset)")
+                            // No local timestamp and local is 0 - fresh install/reset
+                            // On fresh install, default to 0 to prevent stale cloud data from being applied
+                            // User can manually sync if needed
+                            bankedMinsToApply = 0
+                            shouldSyncLocalToCloud = true // Sync 0 to cloud to clear any stale data
+                            Log.d(TAG, "Fresh install detected - setting banked_mins to 0 (cloud had $cloudBankedMins, but ignoring on fresh install)")
                         } else if (cloudTimestamp.isNullOrEmpty()) {
                             // No cloud timestamp - keep local value and sync to cloud
                             bankedMinsToApply = currentLocalBankedMins

@@ -99,7 +99,7 @@ echo "Building signed APK..."
 echo "APK built."
 
 ### --- COPY APK TO GITHUB PAGES FOLDER --- ###
-cp "$APK_SOURCE" "$PAGES_APK_PATH"
+#cp "$APK_SOURCE" "$PAGES_APK_PATH"
 
 ### --- PULL LATEST CHANGES --- ###
 # Pull latest changes (e.g., report uploads from the app)
@@ -186,4 +186,4 @@ git push
 git push --tags
 
 echo "Release v$NEW_VERSION complete!"
-echo "APK deployed to GitHub Pages."
+#echo "APK deployed to GitHub Pages."
