@@ -53,6 +53,22 @@ class AppBlockerService : AccessibilityService() {
     private var chromeJeLisUrl: String? = null // Track if Chrome is viewing JeLis
     private var chromeLaunchedFromBaerenEd: Boolean = false // Track if Chrome was launched from BaerenEd
 
+    // Google Read Along tracking
+    private val GOOGLE_READ_ALONG_PACKAGE = "com.google.android.apps.seekh"
+    private var readAlongSessionStartTime: Long = 0L // When current session started
+    private var readAlongTrackingActive: Boolean = false
+    private var readAlongCompleted: Boolean = false
+    private var readAlongFirstSeenTime: Long = 0L // When we first saw Google Read Along today
+    private val MIN_READ_ALONG_DURATION_SECONDS = 30L
+    private val readAlongCheck = object : Runnable {
+        override fun run() {
+            checkGoogleReadAlongUsage()
+            if (readAlongTrackingActive && !readAlongCompleted) {
+                backgroundHandler.postDelayed(this, 5000) // Check every 5 seconds while tracking
+            }
+        }
+    }
+
     private val CHANNEL_ID = "AppBlockerServiceChannel"
     private val NOTIFICATION_ID = 1
 
@@ -96,6 +112,33 @@ class AppBlockerService : AccessibilityService() {
 
         // Update RewardManager with the current foreground app (for accurate reward time counting)
         RewardManager.updateForegroundApp(pkgName)
+        
+        // Track Google Read Along usage
+        if (pkgName == GOOGLE_READ_ALONG_PACKAGE) {
+            if (!readAlongTrackingActive && !readAlongCompleted) {
+                // Google Read Along just came to foreground - start tracking
+                val now = System.currentTimeMillis()
+                readAlongSessionStartTime = now
+                if (readAlongFirstSeenTime == 0L) {
+                    // First time seeing Google Read Along today - record this
+                    readAlongFirstSeenTime = now
+                }
+                readAlongTrackingActive = true
+                Log.d("AppBlocker", "Google Read Along started - beginning tracking")
+                // Start periodic checks
+                if (!::backgroundHandler.isInitialized) {
+                    backgroundHandler = Handler(backgroundThread.looper)
+                }
+                backgroundHandler.post(readAlongCheck)
+            }
+        } else {
+            // Different app is in foreground - pause tracking (but keep session start time)
+            if (readAlongTrackingActive) {
+                readAlongTrackingActive = false
+                Log.d("AppBlocker", "Google Read Along left foreground - paused tracking")
+            }
+        }
+        
         lastPackage = pkgName
 
         // Check if this app should be blocked
@@ -572,5 +615,129 @@ class AppBlockerService : AccessibilityService() {
         } catch (e: Exception) {
             Log.e("AppBlocker", "Error clearing blocked packages", e)
         }
+    }
+
+    /**
+     * Checks if Google Read Along has been used for the minimum duration.
+     * Uses UsageStatsManager for accurate cumulative tracking across sessions.
+     */
+    private fun checkGoogleReadAlongUsage() {
+        if (readAlongCompleted) {
+            return
+        }
+
+        try {
+            val now = System.currentTimeMillis()
+            val usm = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+            
+            if (usm != null && readAlongFirstSeenTime > 0L) {
+                // Use UsageStatsManager for accurate cumulative tracking
+                // Query usage stats from when we first saw Google Read Along
+                // Use INTERVAL_DAILY to get all stats, then filter by time
+                val usageStats = usm.queryUsageStats(
+                    UsageStatsManager.INTERVAL_DAILY,
+                    readAlongFirstSeenTime - (24 * 60 * 60 * 1000), // Query from 24h ago to be safe
+                    now
+                )
+                
+                var totalUsageMillis = 0L
+                usageStats?.forEach { stat ->
+                    if (stat.packageName == GOOGLE_READ_ALONG_PACKAGE) {
+                        // UsageStatsManager's totalTimeInForeground is cumulative for the interval
+                        // But we only want time from readAlongFirstSeenTime onwards
+                        // The easiest approach: query events to get accurate usage
+                        val events = usm.queryEvents(readAlongFirstSeenTime, now)
+                        var sessionStart: Long? = null
+                        var cumulativeMillis = 0L
+                        
+                        while (events.hasNextEvent()) {
+                            val event = UsageEvents.Event()
+                            events.getNextEvent(event)
+                            
+                            if (event.packageName == GOOGLE_READ_ALONG_PACKAGE) {
+                                when (event.eventType) {
+                                    UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                                        if (sessionStart == null) {
+                                            sessionStart = event.timeStamp
+                                        }
+                                    }
+                                    UsageEvents.Event.MOVE_TO_BACKGROUND -> {
+                                        if (sessionStart != null) {
+                                            cumulativeMillis += (event.timeStamp - sessionStart)
+                                            sessionStart = null
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // If still in foreground, add time from last session start to now
+                        if (sessionStart != null) {
+                            cumulativeMillis += (now - sessionStart)
+                        }
+                        
+                        totalUsageMillis = cumulativeMillis
+                        return@forEach // Exit forEach early - only one package we care about
+                    }
+                }
+                
+                val totalUsageSeconds = totalUsageMillis / 1000
+                Log.d("AppBlocker", "Google Read Along cumulative usage: ${totalUsageSeconds}s (required: ${MIN_READ_ALONG_DURATION_SECONDS}s)")
+                
+                if (totalUsageSeconds >= MIN_READ_ALONG_DURATION_SECONDS && !readAlongCompleted) {
+                    // Mark as completed and notify BaerenEd
+                    readAlongCompleted = true
+                    readAlongTrackingActive = false
+                    notifyBaerenEdOfReadAlongCompletion()
+                    Log.d("AppBlocker", "Google Read Along completed: ${totalUsageSeconds}s >= ${MIN_READ_ALONG_DURATION_SECONDS}s")
+                }
+            } else {
+                // Fallback: simple time-based tracking (less accurate)
+                if (readAlongTrackingActive && readAlongFirstSeenTime > 0L) {
+                    val timeElapsed = now - readAlongFirstSeenTime
+                    val timeElapsedSeconds = timeElapsed / 1000
+                    
+                    Log.d("AppBlocker", "Google Read Along usage (fallback): ${timeElapsedSeconds}s (required: ${MIN_READ_ALONG_DURATION_SECONDS}s)")
+                    
+                    if (timeElapsedSeconds >= MIN_READ_ALONG_DURATION_SECONDS && !readAlongCompleted) {
+                        // Mark as completed and notify BaerenEd
+                        readAlongCompleted = true
+                        readAlongTrackingActive = false
+                        notifyBaerenEdOfReadAlongCompletion()
+                        Log.d("AppBlocker", "Google Read Along completed (fallback): ${timeElapsedSeconds}s >= ${MIN_READ_ALONG_DURATION_SECONDS}s")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("AppBlocker", "Error checking Google Read Along usage", e)
+        }
+    }
+
+    /**
+     * Notifies BaerenEd that Google Read Along task is complete by broadcasting an intent.
+     */
+    private fun notifyBaerenEdOfReadAlongCompletion() {
+        try {
+            val intent = Intent("com.talq2me.baerened.ACTION_READ_ALONG_COMPLETE").apply {
+                setPackage("com.talq2me.baerened")
+                putExtra("task_id", "googleReadAlong")
+                putExtra("task_title", "Google Read Along")
+                putExtra("duration_seconds", MIN_READ_ALONG_DURATION_SECONDS)
+            }
+            sendBroadcast(intent)
+            Log.d("AppBlocker", "Broadcasted Google Read Along completion to BaerenEd")
+        } catch (e: Exception) {
+            Log.e("AppBlocker", "Error notifying BaerenEd of Read Along completion", e)
+        }
+    }
+
+    /**
+     * Resets Google Read Along tracking (called when a new session should be tracked).
+     */
+    fun resetReadAlongTracking() {
+        readAlongTrackingActive = false
+        readAlongCompleted = false
+        readAlongSessionStartTime = 0L
+        readAlongFirstSeenTime = 0L
+        Log.d("AppBlocker", "Reset Google Read Along tracking")
     }
 }
