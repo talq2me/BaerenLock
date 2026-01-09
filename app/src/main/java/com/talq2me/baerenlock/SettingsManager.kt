@@ -732,15 +732,7 @@ object SettingsManager {
             }
             
             // Generate timestamp in ISO 8601 format with EST timezone (same format as BaerenEd)
-            val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
-            val now = java.util.Date()
-            val offsetMillis = estTimeZone.getOffset(now.time)
-            val offsetHours = offsetMillis / (1000 * 60 * 60)
-            val offsetMinutes = Math.abs((offsetMillis % (1000 * 60 * 60)) / (1000 * 60))
-            val offsetString = String.format("%+03d:%02d", offsetHours, offsetMinutes)
-            val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault())
-            dateFormat.timeZone = estTimeZone
-            val lastUpdated = dateFormat.format(now) + offsetString
+            val lastUpdated = generateESTTimestamp()
             
             // Update banked_mins AND last_updated timestamp in user_data table
             // This ensures the timestamp reflects when reward time was last changed
@@ -950,11 +942,11 @@ object SettingsManager {
                         
                         if (localBankedMinsTimestamp.isNullOrEmpty() && currentLocalBankedMins == 0) {
                             // No local timestamp and local is 0 - fresh install/reset
-                            // On fresh install, default to 0 to prevent stale cloud data from being applied
-                            // User can manually sync if needed
+                            // On fresh install, ALWAYS default to 0 to prevent stale cloud data from being applied
+                            // This ensures fresh installs start clean, even if cloud has old data
                             bankedMinsToApply = 0
                             shouldSyncLocalToCloud = true // Sync 0 to cloud to clear any stale data
-                            Log.d(TAG, "Fresh install detected - setting banked_mins to 0 (cloud had $cloudBankedMins, but ignoring on fresh install)")
+                            Log.d(TAG, "Fresh install detected - setting banked_mins to 0 (cloud had $cloudBankedMins, but ignoring on fresh install to prevent stale data)")
                         } else if (cloudTimestamp.isNullOrEmpty()) {
                             // No cloud timestamp - keep local value and sync to cloud
                             bankedMinsToApply = currentLocalBankedMins
@@ -998,6 +990,11 @@ object SettingsManager {
                         if (!shouldSyncLocalToCloud && !cloudTimestamp.isNullOrEmpty()) {
                             editor.putString("banked_mins_timestamp", cloudTimestamp)
                             Log.d(TAG, "Updated local banked_mins timestamp to match cloud: $cloudTimestamp")
+                        } else if (shouldSyncLocalToCloud && localBankedMinsTimestamp.isNullOrEmpty()) {
+                            // Fresh install - set a timestamp in EST to prevent cloud value from being applied again
+                            val estTimestamp = generateESTTimestamp()
+                            editor.putString("banked_mins_timestamp", estTimestamp)
+                            Log.d(TAG, "Set initial banked_mins_timestamp in EST ($estTimestamp) to prevent cloud value from being applied again")
                         }
                         editor.apply()
                         
@@ -1050,6 +1047,22 @@ object SettingsManager {
             // Always remove from downloading set when done
             downloadingProfiles.remove(cloudProfile)
         }
+    }
+    
+    /**
+     * Generates a timestamp in ISO 8601 format with EST timezone.
+     * This ensures all local timestamps use EST, matching cloud timestamps.
+     */
+    private fun generateESTTimestamp(): String {
+        val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
+        val now = java.util.Date()
+        val offsetMillis = estTimeZone.getOffset(now.time)
+        val offsetHours = offsetMillis / (1000 * 60 * 60)
+        val offsetMinutes = Math.abs((offsetMillis % (1000 * 60 * 60)) / (1000 * 60))
+        val offsetString = String.format("%+03d:%02d", offsetHours, offsetMinutes)
+        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault())
+        dateFormat.timeZone = estTimeZone
+        return dateFormat.format(now) + offsetString
     }
     
     /**
