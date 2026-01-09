@@ -74,12 +74,14 @@ class AppBlockerService : AccessibilityService() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d("AppBlocker", "🚀 AppBlockerService onCreate() - service starting")
         createNotificationChannel()
 
         backgroundThread = HandlerThread("AppBlockerBackground").apply {
             start()
         }
         backgroundHandler = Handler(backgroundThread.looper)
+        Log.d("AppBlocker", "✅ AppBlockerService initialized - ready to track apps (including Google Read Along: $GOOGLE_READ_ALONG_PACKAGE)")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -114,9 +116,14 @@ class AppBlockerService : AccessibilityService() {
         RewardManager.updateForegroundApp(pkgName)
         
         // Track Google Read Along usage
+        // Log when we see the package to help debug
+        if (pkgName.contains("seekh", ignoreCase = true) || pkgName == GOOGLE_READ_ALONG_PACKAGE) {
+            Log.d("AppBlocker", "🔍 READ ALONG PACKAGE DETECTED: $pkgName (expected: $GOOGLE_READ_ALONG_PACKAGE)")
+        }
+        
         if (pkgName == GOOGLE_READ_ALONG_PACKAGE) {
             val now = System.currentTimeMillis()
-            Log.d("AppBlocker", "Google Read Along detected in foreground. trackingActive=$readAlongTrackingActive, completed=$readAlongCompleted, firstSeen=$readAlongFirstSeenTime")
+            Log.d("AppBlocker", "✅ Google Read Along detected in foreground! trackingActive=$readAlongTrackingActive, completed=$readAlongCompleted, firstSeen=$readAlongFirstSeenTime")
             
             // Reset tracking if it's been more than 1 hour since first seen (allows new session tracking)
             if (readAlongCompleted && readAlongFirstSeenTime > 0L) {
