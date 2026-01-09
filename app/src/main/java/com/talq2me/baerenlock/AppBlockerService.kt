@@ -115,27 +115,42 @@ class AppBlockerService : AccessibilityService() {
         
         // Track Google Read Along usage
         if (pkgName == GOOGLE_READ_ALONG_PACKAGE) {
+            val now = System.currentTimeMillis()
+            Log.d("AppBlocker", "Google Read Along detected in foreground. trackingActive=$readAlongTrackingActive, completed=$readAlongCompleted, firstSeen=$readAlongFirstSeenTime")
+            
+            // Reset tracking if it's been more than 1 hour since first seen (allows new session tracking)
+            if (readAlongCompleted && readAlongFirstSeenTime > 0L) {
+                val timeSinceFirstSeen = now - readAlongFirstSeenTime
+                val ONE_HOUR_MS = 60 * 60 * 1000L
+                if (timeSinceFirstSeen > ONE_HOUR_MS) {
+                    Log.d("AppBlocker", "Resetting Read Along tracking (been ${timeSinceFirstSeen/1000/60} minutes since first seen)")
+                    resetReadAlongTracking()
+                }
+            }
+            
             if (!readAlongTrackingActive && !readAlongCompleted) {
                 // Google Read Along just came to foreground - start tracking
-                val now = System.currentTimeMillis()
                 readAlongSessionStartTime = now
                 if (readAlongFirstSeenTime == 0L) {
                     // First time seeing Google Read Along today - record this
                     readAlongFirstSeenTime = now
+                    Log.d("AppBlocker", "First time seeing Google Read Along today, recording firstSeenTime=$now")
                 }
                 readAlongTrackingActive = true
-                Log.d("AppBlocker", "Google Read Along started - beginning tracking")
+                Log.d("AppBlocker", "Google Read Along started - beginning tracking (firstSeen=$readAlongFirstSeenTime, sessionStart=$readAlongSessionStartTime)")
                 // Start periodic checks
                 if (!::backgroundHandler.isInitialized) {
                     backgroundHandler = Handler(backgroundThread.looper)
                 }
                 backgroundHandler.post(readAlongCheck)
+            } else if (readAlongCompleted) {
+                Log.d("AppBlocker", "Google Read Along already completed, not tracking again (reset after 1 hour)")
             }
         } else {
             // Different app is in foreground - pause tracking (but keep session start time)
             if (readAlongTrackingActive) {
                 readAlongTrackingActive = false
-                Log.d("AppBlocker", "Google Read Along left foreground - paused tracking")
+                Log.d("AppBlocker", "Google Read Along left foreground - paused tracking (firstSeen=$readAlongFirstSeenTime)")
             }
         }
         
@@ -724,9 +739,9 @@ class AppBlockerService : AccessibilityService() {
                 putExtra("duration_seconds", MIN_READ_ALONG_DURATION_SECONDS)
             }
             sendBroadcast(intent)
-            Log.d("AppBlocker", "Broadcasted Google Read Along completion to BaerenEd")
+            Log.d("AppBlocker", "✅ Broadcasted Google Read Along completion to BaerenEd: task_id=googleReadAlong, duration=${MIN_READ_ALONG_DURATION_SECONDS}s")
         } catch (e: Exception) {
-            Log.e("AppBlocker", "Error notifying BaerenEd of Read Along completion", e)
+            Log.e("AppBlocker", "❌ Error notifying BaerenEd of Read Along completion", e)
         }
     }
 
