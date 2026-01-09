@@ -21,6 +21,7 @@ object SettingsManager {
 
     private const val TAG = "SettingsManager"
     private const val LOCAL_PREFS_NAME = "settings"
+    private const val KEY_USE_CLOUD = "use_cloud_storage"
     private val gson = Gson()
     private val client = OkHttpClient()
     
@@ -597,6 +598,10 @@ object SettingsManager {
      * Call this after updating reward apps, blacklisted apps, or whitelisted apps
      */
     fun syncAppListsToCloudAsync(context: Context) {
+        if (!isCloudStorageEnabled(context)) {
+            Log.d(TAG, "Cloud storage disabled, skipping app lists sync")
+            return
+        }
         settingsScope.launch {
             try {
                 syncAppListsToCloud(context)
@@ -703,6 +708,10 @@ object SettingsManager {
      * This ensures accurate reward time when syncing from cloud
      */
     fun syncRewardMinutesToCloudAsync(context: Context, rewardMinutes: Int) {
+        if (!isCloudStorageEnabled(context)) {
+            Log.d(TAG, "Cloud storage disabled, skipping reward minutes sync")
+            return
+        }
         settingsScope.launch {
             try {
                 syncRewardMinutesToCloud(context, rewardMinutes)
@@ -777,7 +786,28 @@ object SettingsManager {
      * Downloads user_data from cloud for the current profile and applies it locally
      * This should be called when profile changes or on app startup
      */
+    /**
+     * Checks if cloud storage is enabled
+     */
+    fun isCloudStorageEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_USE_CLOUD, false)
+    }
+
+    /**
+     * Enables or disables cloud storage
+     */
+    fun setCloudStorageEnabled(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_USE_CLOUD, enabled).apply()
+        Log.d(TAG, "Cloud storage ${if (enabled) "enabled" else "disabled"}")
+    }
+
     fun downloadUserDataFromCloud(context: Context) {
+        if (!isCloudStorageEnabled(context)) {
+            Log.d(TAG, "Cloud storage disabled, skipping user_data download")
+            return
+        }
         settingsScope.launch {
             try {
                 val localProfile = readProfile(context) ?: "A"
@@ -799,6 +829,10 @@ object SettingsManager {
      * @param isRetry true if this is a retry after triggering a reset (prevents infinite loops)
      */
     private suspend fun downloadUserDataFromCloud(context: Context, cloudProfile: String, isRetry: Boolean = false): Boolean = withContext(Dispatchers.IO) {
+        if (!isCloudStorageEnabled(context)) {
+            Log.d(TAG, "Cloud storage disabled, skipping user_data download")
+            return@withContext false
+        }
         if (!isConfigured(context)) {
             Log.d(TAG, "Supabase not configured, skipping user_data download")
             return@withContext false
@@ -963,6 +997,8 @@ object SettingsManager {
                                 }
                                 val cloudTime = parseTimestampForComparison(cloudTimestamp)
                                 
+                                Log.d(TAG, "Comparing timestamps - local: $localBankedMinsTimestamp ($localTime), cloud: $cloudTimestamp ($cloudTime)")
+                                
                                 if (cloudTime > localTime) {
                                     // Cloud is newer - apply cloud value
                                     bankedMinsToApply = cloudBankedMins
@@ -1106,19 +1142,47 @@ object SettingsManager {
                         java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.getDefault())
                     } catch (e: Exception) {
                         // Fallback to manual parsing if XXX not supported (API < 24)
-                        // Find the last occurrence of either '+' or '-'
-                        val lastPlusIndex = timestamp.lastIndexOf('+')
-                        val lastMinusIndex = timestamp.lastIndexOf('-')
-                        val delimiterIndex = if (lastPlusIndex > lastMinusIndex) lastPlusIndex else lastMinusIndex
-                        val delimiter = if (lastPlusIndex > lastMinusIndex) '+' else '-'
-                        val basePart = timestamp.substring(0, delimiterIndex)
-                        val offsetPart = timestamp.substring(delimiterIndex + 1)
-                        val offsetHours = offsetPart.substringBefore(":").toInt()
-                        val offsetMinutes = offsetPart.substringAfter(":").toInt()
-                        val offsetMillis = (offsetHours * 60 + offsetMinutes) * 60 * 1000L
-                        val sign = if (delimiter == '+') 1 else -1
-                        val parsed = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault()).parse(basePart)
-                        return (parsed?.time ?: 0L) - (sign * offsetMillis)
+                        // Find the timezone offset - look for +/- after the time part (after 'T' and time)
+                        // Format: "2026-01-09T14:30:00.123-05:00" or "2026-01-09T14:30:00.123+05:00"
+                        // We need to find the LAST +/- that comes after the time part (after seconds/milliseconds)
+                        val timePartEnd = timestamp.indexOf('.')
+                        val timeEndIndex = if (timePartEnd > 0) {
+                            // Has milliseconds - find the end of milliseconds
+                            val millisEnd = timestamp.indexOfAny(charArrayOf('+', '-', 'Z'), timePartEnd)
+                            if (millisEnd > 0) millisEnd else timestamp.length
+                        } else {
+                            // No milliseconds - find ':' after seconds
+                            val secondsColon = timestamp.lastIndexOf(':')
+                            if (secondsColon > 0) secondsColon + 3 else timestamp.length
+                        }
+                        
+                        // Now find the timezone delimiter after the time part
+                        val plusIndex = timestamp.indexOf('+', timeEndIndex)
+                        val minusIndex = timestamp.indexOf('-', timeEndIndex)
+                        val delimiterIndex = when {
+                            plusIndex > 0 && minusIndex > 0 -> maxOf(plusIndex, minusIndex)
+                            plusIndex > 0 -> plusIndex
+                            minusIndex > 0 -> minusIndex
+                            else -> -1
+                        }
+                        
+                        if (delimiterIndex > 0) {
+                            val delimiter = timestamp[delimiterIndex]
+                            val basePart = timestamp.substring(0, delimiterIndex)
+                            val offsetPart = timestamp.substring(delimiterIndex + 1)
+                            val offsetHours = offsetPart.substringBefore(":").toInt()
+                            val offsetMinutes = offsetPart.substringAfter(":").toInt()
+                            val offsetMillis = (offsetHours * 60 + offsetMinutes) * 60 * 1000L
+                            val sign = if (delimiter == '+') 1 else -1
+                            val parsed = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault()).parse(basePart)
+                            return (parsed?.time ?: 0L) - (sign * offsetMillis)
+                        } else {
+                            // No timezone found - parse as EST
+                            val parsed = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault()).apply {
+                                timeZone = java.util.TimeZone.getTimeZone("America/New_York")
+                            }.parse(timestamp)
+                            return parsed?.time ?: 0L
+                        }
                     }
                 }
                 else -> {

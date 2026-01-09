@@ -33,6 +33,7 @@ class LauncherActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
     private var rewardMinutesTextView: TextView? = null
     private var backgroundImageView: ImageView? = null
+    private var cloudToggleButton: ImageButton? = null
 
     companion object {
         private const val TAG = "LauncherActivity"
@@ -105,6 +106,18 @@ class LauncherActivity : AppCompatActivity() {
             }
         }
         topBar.addView(settingsButton)
+
+        // Cloud sync toggle button
+        cloudToggleButton = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_cloud)
+            layoutParams = LinearLayout.LayoutParams(80, 80)
+            setPadding(16, 16, 16, 16)
+            updateCloudToggleState()
+            setOnClickListener {
+                toggleCloudSync()
+            }
+        }
+        topBar.addView(cloudToggleButton)
 
         val versionTextView = TextView(this).apply {
             text = getVersionLabel()
@@ -209,6 +222,9 @@ class LauncherActivity : AppCompatActivity() {
 
         // Download user_data from cloud for current profile (to get accurate reward minutes)
         SettingsManager.downloadUserDataFromCloud(this)
+        
+        // Update cloud toggle state
+        updateCloudToggleState()
         
         RewardManager.loadRewardMinutes(this)
         if (RewardManager.currentRewardMinutes > 0) {
@@ -858,6 +874,43 @@ class LauncherActivity : AppCompatActivity() {
             }
         } else {
             Log.d(TAG, "No valid reward minutes in Intent (rewardMinutes=$incomingRewardMinutes, transactionId=$transactionId)")
+        }
+    }
+
+    private fun updateCloudToggleState() {
+        val isEnabled = SettingsManager.isCloudStorageEnabled(this)
+        cloudToggleButton?.let { button ->
+            // Set background color: green when on, grey when off
+            val color = if (isEnabled) {
+                Color.parseColor("#4CAF50") // Green
+            } else {
+                Color.parseColor("#9E9E9E") // Grey
+            }
+            button.setBackgroundColor(color)
+            button.contentDescription = if (isEnabled) "Cloud sync ON" else "Cloud sync OFF"
+        }
+    }
+
+    private fun toggleCloudSync() {
+        val currentState = SettingsManager.isCloudStorageEnabled(this)
+        val newState = !currentState
+        SettingsManager.setCloudStorageEnabled(this, newState)
+        updateCloudToggleState()
+        
+        if (newState) {
+            // Cloud sync enabled - trigger immediate sync
+            Toast.makeText(this, "Cloud sync enabled - syncing...", Toast.LENGTH_SHORT).show()
+            SettingsManager.downloadUserDataFromCloud(this)
+            // Also trigger a sync of local data to cloud
+            val profile = readProfile() ?: "A"
+            SettingsManager.syncAppListsToCloudAsync(this)
+            // Reload reward minutes after sync
+            Handler(Looper.getMainLooper()).postDelayed({
+                RewardManager.loadRewardMinutes(this)
+                updateRewardMinutesDisplay()
+            }, 2000) // Wait 2 seconds for sync to complete
+        } else {
+            Toast.makeText(this, "Cloud sync disabled", Toast.LENGTH_SHORT).show()
         }
     }
 
