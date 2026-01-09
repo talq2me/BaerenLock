@@ -731,10 +731,22 @@ object SettingsManager {
                 else -> localProfile // If already AM/BM, use as-is
             }
             
-            // Update banked_mins in user_data table
-            // Note: banked_mins represents the current available reward minutes
+            // Generate timestamp in ISO 8601 format with EST timezone (same format as BaerenEd)
+            val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
+            val now = java.util.Date()
+            val offsetMillis = estTimeZone.getOffset(now.time)
+            val offsetHours = offsetMillis / (1000 * 60 * 60)
+            val offsetMinutes = Math.abs((offsetMillis % (1000 * 60 * 60)) / (1000 * 60))
+            val offsetString = String.format("%+03d:%02d", offsetHours, offsetMinutes)
+            val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault())
+            dateFormat.timeZone = estTimeZone
+            val lastUpdated = dateFormat.format(now) + offsetString
+            
+            // Update banked_mins AND last_updated timestamp in user_data table
+            // This ensures the timestamp reflects when reward time was last changed
             val updateMap = mapOf(
-                "banked_mins" to rewardMinutes
+                "banked_mins" to rewardMinutes,
+                "last_updated" to lastUpdated
             )
             
             val json = gson.toJson(updateMap)
@@ -754,7 +766,7 @@ object SettingsManager {
             val patchResponse = client.newCall(patchRequest).execute()
             if (patchResponse.isSuccessful) {
                 patchResponse.close()
-                Log.d(TAG, "Successfully synced reward minutes to cloud for profile: $cloudProfile, minutes: $rewardMinutes")
+                Log.d(TAG, "Successfully synced reward minutes to cloud for profile: $cloudProfile, minutes: $rewardMinutes, timestamp: $lastUpdated")
                 return@withContext true
             } else {
                 val errorBody = patchResponse.body?.string() ?: "Unknown error"
@@ -925,33 +937,97 @@ object SettingsManager {
                             // Just use the current cloud values (they should be correct after reset)
                         }
                         
-                        // Apply banked_mins to local reward minutes
-                        val bankedMins = (userData["banked_mins"] as? Number)?.toInt() ?: 0
-                        if (bankedMins >= 0) {
-                            // Update local reward minutes
-                            val rewardPrefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
-                            rewardPrefs.edit()
-                                .putInt("current_reward_minutes", bankedMins)
-                                .putLong("last_reward_date", todayMillis) // Update date to today
-                                .apply()
-                            
-                            // Also update RewardManager's current value
+                        // TIMESTAMP-BASED SYNC: Compare local banked_mins timestamp vs cloud last_updated timestamp
+                        // Apply whichever is newer (most recent timestamp wins)
+                        val rewardPrefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
+                        val currentLocalBankedMins = rewardPrefs.getInt("current_reward_minutes", 0)
+                        val localBankedMinsTimestamp = rewardPrefs.getString("banked_mins_timestamp", null)
+                        val cloudBankedMins = (userData["banked_mins"] as? Number)?.toInt() ?: 0
+                        val cloudTimestamp = userData["last_updated"] as? String
+                        
+                        var bankedMinsToApply: Int
+                        var shouldSyncLocalToCloud: Boolean
+                        
+                        if (localBankedMinsTimestamp.isNullOrEmpty() && currentLocalBankedMins == 0) {
+                            // No local timestamp and local is 0 - fresh install/reset, apply cloud value
+                            bankedMinsToApply = cloudBankedMins
+                            shouldSyncLocalToCloud = false
+                            Log.d(TAG, "Applying cloud banked_mins ($cloudBankedMins) - no local timestamp, local is 0 (fresh install/reset)")
+                        } else if (cloudTimestamp.isNullOrEmpty()) {
+                            // No cloud timestamp - keep local value and sync to cloud
+                            bankedMinsToApply = currentLocalBankedMins
+                            shouldSyncLocalToCloud = true
+                            Log.d(TAG, "Keeping local banked_mins ($currentLocalBankedMins) - cloud has no timestamp")
+                        } else {
+                            // Both have timestamps - compare and use the newer one
                             try {
-                                val rewardManagerClass = Class.forName("com.talq2me.baerenlock.RewardManager")
-                                val currentMinutesField = rewardManagerClass.getDeclaredField("currentRewardMinutes")
-                                currentMinutesField.isAccessible = true
-                                currentMinutesField.set(null, bankedMins)
-                                Log.d(TAG, "Updated RewardManager.currentRewardMinutes to $bankedMins from cloud")
+                                val localTime = if (!localBankedMinsTimestamp.isNullOrEmpty()) {
+                                    parseTimestampForComparison(localBankedMinsTimestamp)
+                                } else {
+                                    // No local timestamp but local has value - treat as very old (0) to prefer cloud
+                                    0L
+                                }
+                                val cloudTime = parseTimestampForComparison(cloudTimestamp)
+                                
+                                if (cloudTime > localTime) {
+                                    // Cloud is newer - apply cloud value
+                                    bankedMinsToApply = cloudBankedMins
+                                    shouldSyncLocalToCloud = false
+                                    Log.d(TAG, "Applying cloud banked_mins ($cloudBankedMins) - cloud timestamp ($cloudTimestamp) is newer than local ($localBankedMinsTimestamp)")
+                                } else {
+                                    // Local is newer or equal - keep local value and sync to cloud
+                                    bankedMinsToApply = currentLocalBankedMins
+                                    shouldSyncLocalToCloud = true
+                                    Log.d(TAG, "Keeping local banked_mins ($currentLocalBankedMins) - local timestamp ($localBankedMinsTimestamp) is newer than or equal to cloud ($cloudTimestamp)")
+                                }
                             } catch (e: Exception) {
-                                Log.w(TAG, "Could not update RewardManager.currentRewardMinutes directly: ${e.message}")
+                                Log.e(TAG, "Error comparing timestamps for banked_mins, keeping local value", e)
+                                bankedMinsToApply = currentLocalBankedMins
+                                shouldSyncLocalToCloud = true
                             }
-                            
-                            Log.d(TAG, "Downloaded and applied banked_mins from cloud: $bankedMins for profile: $cloudProfile")
-                            
-                            // Send broadcast to update UI
-                            val intent = Intent("com.talq2me.baerenlock.ACTION_REWARD_TIME_UPDATED")
-                            LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
                         }
+                        
+                        // Update local reward minutes with the chosen value
+                        val editor = rewardPrefs.edit()
+                        editor.putInt("current_reward_minutes", bankedMinsToApply)
+                        editor.putLong("last_reward_date", todayMillis) // Update date to today
+                        
+                        // If we applied cloud value, update local timestamp to match cloud timestamp
+                        if (!shouldSyncLocalToCloud && !cloudTimestamp.isNullOrEmpty()) {
+                            editor.putString("banked_mins_timestamp", cloudTimestamp)
+                            Log.d(TAG, "Updated local banked_mins timestamp to match cloud: $cloudTimestamp")
+                        }
+                        editor.apply()
+                        
+                        // Also update RewardManager's current value
+                        try {
+                            val rewardManagerClass = Class.forName("com.talq2me.baerenlock.RewardManager")
+                            val currentMinutesField = rewardManagerClass.getDeclaredField("currentRewardMinutes")
+                            currentMinutesField.isAccessible = true
+                            currentMinutesField.set(null, bankedMinsToApply)
+                            Log.d(TAG, "Updated RewardManager.currentRewardMinutes to $bankedMinsToApply (was: $currentLocalBankedMins, cloud: $cloudBankedMins)")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Could not update RewardManager.currentRewardMinutes directly: ${e.message}")
+                        }
+                        
+                        // If we kept local value and it differs from cloud, sync local to cloud
+                        if (shouldSyncLocalToCloud && bankedMinsToApply != cloudBankedMins) {
+                            Log.d(TAG, "Local banked_mins ($bankedMinsToApply) differs from cloud ($cloudBankedMins), syncing local to cloud")
+                            CoroutineScope(Dispatchers.IO).launch {
+                                try {
+                                    syncRewardMinutesToCloud(context, bankedMinsToApply)
+                                    Log.d(TAG, "Synced local banked_mins ($bankedMinsToApply) to cloud")
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Error syncing local banked_mins to cloud", e)
+                                }
+                            }
+                        }
+                        
+                        Log.d(TAG, "Downloaded and applied banked_mins from cloud: $bankedMinsToApply (cloud: $cloudBankedMins, local was: $currentLocalBankedMins) for profile: $cloudProfile")
+                        
+                        // Send broadcast to update UI
+                        val intent = Intent("com.talq2me.baerenlock.ACTION_REWARD_TIME_UPDATED")
+                        LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
                         
                         return@withContext true
                     }
@@ -985,6 +1061,64 @@ object SettingsManager {
         } catch (e: Exception) {
             Log.w(TAG, "Error parsing timestamp: $timestamp", e)
             Date()
+        }
+    }
+    
+    /**
+     * Parses timestamp string to milliseconds for comparison
+     * Handles both ISO 8601 format (from Supabase) and our EST format
+     */
+    private fun parseTimestampForComparison(timestamp: String): Long {
+        return try {
+            // Handle ISO 8601 formats with timezone
+            // Formats: "2026-01-06T19:52:08.190Z", "2026-01-07T00:35:11.680263+00:00", "2026-01-06T19:35:11-05:00"
+            
+            // Check if it has timezone indicator
+            val hasZ = timestamp.endsWith("Z")
+            val hasOffset = timestamp.matches(Regex(".*[+-]\\d{2}:\\d{2}$"))
+            
+            val dateFormat = when {
+                hasZ -> {
+                    // UTC timezone (Z suffix)
+                    java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.getDefault()).apply {
+                        timeZone = java.util.TimeZone.getTimeZone("UTC")
+                    }
+                }
+                hasOffset -> {
+                    // Has timezone offset (+05:00 or -05:00)
+                    // Try with milliseconds first, fallback to manual parsing if needed
+                    try {
+                        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.getDefault())
+                    } catch (e: Exception) {
+                        // Fallback to manual parsing if XXX not supported (API < 24)
+                        // Find the last occurrence of either '+' or '-'
+                        val lastPlusIndex = timestamp.lastIndexOf('+')
+                        val lastMinusIndex = timestamp.lastIndexOf('-')
+                        val delimiterIndex = if (lastPlusIndex > lastMinusIndex) lastPlusIndex else lastMinusIndex
+                        val delimiter = if (lastPlusIndex > lastMinusIndex) '+' else '-'
+                        val basePart = timestamp.substring(0, delimiterIndex)
+                        val offsetPart = timestamp.substring(delimiterIndex + 1)
+                        val offsetHours = offsetPart.substringBefore(":").toInt()
+                        val offsetMinutes = offsetPart.substringAfter(":").toInt()
+                        val offsetMillis = (offsetHours * 60 + offsetMinutes) * 60 * 1000L
+                        val sign = if (delimiter == '+') 1 else -1
+                        val parsed = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault()).parse(basePart)
+                        return (parsed?.time ?: 0L) - (sign * offsetMillis)
+                    }
+                }
+                else -> {
+                    // No timezone - assume EST (our format)
+                    java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault()).apply {
+                        timeZone = java.util.TimeZone.getTimeZone("America/New_York")
+                    }
+                }
+            }
+            
+            val date = dateFormat.parse(timestamp)
+            date?.time ?: 0L
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing timestamp for comparison: $timestamp", e)
+            0L
         }
     }
 

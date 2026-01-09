@@ -356,10 +356,23 @@ object RewardManager {
             set(Calendar.MILLISECOND, 0)
         }.timeInMillis
         editor.putLong("last_reward_date", today)
-        editor.apply()
-        Log.d("RewardManager", "Saved reward minutes to SharedPreferences: $currentRewardMinutes, date: $today")
         
-        // Sync to cloud database to keep it accurate
+        // Generate and store timestamp for banked_mins (ISO 8601 format with EST timezone)
+        val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
+        val now = java.util.Date()
+        val offsetMillis = estTimeZone.getOffset(now.time)
+        val offsetHours = offsetMillis / (1000 * 60 * 60)
+        val offsetMinutes = Math.abs((offsetMillis % (1000 * 60 * 60)) / (1000 * 60))
+        val offsetString = String.format("%+03d:%02d", offsetHours, offsetMinutes)
+        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault())
+        dateFormat.timeZone = estTimeZone
+        val timestamp = dateFormat.format(now) + offsetString
+        editor.putString("banked_mins_timestamp", timestamp)
+        
+        editor.apply()
+        Log.d("RewardManager", "Saved reward minutes to SharedPreferences: $currentRewardMinutes, date: $today, timestamp: $timestamp")
+        
+        // Sync to cloud database to keep it accurate (this will also update cloud timestamp)
         syncRewardMinutesToCloud(context)
     }
     
