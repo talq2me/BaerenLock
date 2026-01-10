@@ -788,10 +788,11 @@ object SettingsManager {
      */
     /**
      * Checks if cloud storage is enabled
+     * Defaults to true (enabled) for new installations
      */
     fun isCloudStorageEnabled(context: Context): Boolean {
         val prefs = context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean(KEY_USE_CLOUD, false)
+        return prefs.getBoolean(KEY_USE_CLOUD, true)
     }
 
     /**
