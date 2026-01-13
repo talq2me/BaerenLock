@@ -17,8 +17,13 @@ import android.os.Build
 import android.app.AppOpsManager
 
 object RewardManager {
+    private const val TAG = "RewardManager"
 
-    var currentRewardMinutes: Int = 0
+    // Delegate to RewardStorage for current minutes
+    var currentRewardMinutes: Int
+        get() = RewardStorage.getCurrentRewardMinutes()
+        set(value) = RewardStorage.setCurrentRewardMinutes(value)
+    
     private var rewardTimer: Handler? = null
     private var rewardRunnable: Runnable? = null
     private var usageTracker: RewardUsageTracker? = null
@@ -27,49 +32,33 @@ object RewardManager {
     private var rewardTimeStartTime: Long = 0 // Track when reward time session started
     private var rewardTimeStartMinutes: Int = 0 // Track how many minutes we started with (for usage-based tracking)
     private var lastUsageCheckTime: Long = 0 // Track when we last checked usage stats
+    private var lastPeriodicSaveLogTime: Long = 0 // Track when we last logged a periodic save
     
     // Store last reward session data for report generation
     var lastRewardSessions: List<RewardUsageTracker.AppUsageSession>? = null
     var lastRewardSummary: RewardUsageTracker.RewardSessionSummary? = null
 
-    // Fixed set of apps allowed to run in the background (memory control)
-    private val memoryAllowedApps = setOf(
-        "com.talq2me.baerenlock",
-        "com.talq2me.baerened",
-        "com.nianticlabs.pokemongo" // Pokemon GO is always allowed in memory
-    )
-
-    // Essential system packages that should never be killed
-    private val essentialSystemPackages = setOf(
-        "com.android.systemui",
-        "com.android.launcher",
-        "com.android.launcher3",
-        "com.google.android.apps.nexuslauncher",
-        "android",
-        "com.android.phone",
-        "com.android.settings",
-        "com.android.providers.settings",
-        "com.android.providers.downloads",
-        "com.android.providers.media",
-        "com.android.providers.calendar",
-        "com.android.providers.contacts",
-        "com.android.packageinstaller", // For app installation/permissions
-        "com.google.android.packageinstaller", // Google's package installer
-        "com.android.vending", // Google Play Store
-        "com.google.android.settings.intelligence" // Google-specific settings intelligence
-    )
-
-    val allowedApps = mutableSetOf(
-        "com.talq2me.baerened", // BaerenEd app (will be part of memoryAllowedApps too)
-        "com.talq2me.baerenlock" // BaerenLock launcher (will be part of memoryAllowedApps too)
-    )
-    private val temporaryApps = mutableSetOf<String>()
-    val rewardEligibleApps = mutableSetOf<String>() // New set to store user-configured reward apps
+    // Delegate to RewardAppsManager for app lists
+    // Note: These return mutable sets for backward compatibility, but changes should go through RewardAppsManager
+    val allowedApps: MutableSet<String>
+        get() = RewardAppsManager.getAllowedAppsList().toMutableSet()
+    
+    val rewardEligibleApps: MutableSet<String>
+        get() = RewardAppsManager.getRewardEligibleApps().toMutableSet()
+    
+    // Helper to get rewardEligibleApps for internal use (more efficient)
+    private val rewardEligibleAppsSet: Set<String>
+        get() = RewardAppsManager.getRewardEligibleApps()
+    
+    // Access to memory allowed apps and essential system packages
+    val memoryAllowedApps: Set<String>
+        get() = RewardAppsManager.memoryAllowedApps
+    
+    val essentialSystemPackages: Set<String>
+        get() = RewardAppsManager.essentialSystemPackages
 
     fun grantAccess(context: Context, pkg: String, minutes: Int) {
-        allowedApps.add(pkg)
-        temporaryApps.add(pkg)
-        saveAllowedApps(context)
+        RewardAppsManager.grantTemporaryAccess(pkg, context)
         
         // Start tracking reward session usage
         startRewardSessionTracking(context)
@@ -77,101 +66,42 @@ object RewardManager {
         rewardRunnable?.let { rewardTimer?.removeCallbacks(it) }
         rewardTimer = Handler(Looper.getMainLooper())
         rewardRunnable = Runnable {
-            Log.d("RewardManager", "🚫 Reward time expired for $pkg - removing from allowed apps")
-            allowedApps.remove(pkg)
-            temporaryApps.remove(pkg)
-            saveAllowedApps(context)
-            Log.d("RewardManager", "Updated allowed apps: $allowedApps")
+            Log.d(TAG, "🚫 Reward time expired for $pkg - removing from allowed apps")
+            RewardAppsManager.revokeTemporaryAccess(pkg, context)
+            Log.d(TAG, "Updated allowed apps")
 
             // 🚫 Try to kill the app's background processes
-            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             am.killBackgroundProcesses(pkg)
 
             // ✅ Return to launcher/home
-            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
-            intent.addCategory(android.content.Intent.CATEGORY_HOME)
-            intent.flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+            val intent = Intent(Intent.ACTION_MAIN)
+            intent.addCategory(Intent.CATEGORY_HOME)
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
             context.startActivity(intent)
         }
         rewardTimer?.postDelayed(rewardRunnable!!, minutes * 60 * 1000L)
     }
 
     fun isAllowed(pkg: String): Boolean {
-        // An app is allowed if it's permanently whitelisted, temporarily allowed, OR
-        // if it's a reward-eligible app AND reward minutes are currently active.
-        val allowed = allowedApps.contains(pkg) ||
-                      temporaryApps.contains(pkg) ||
-                      (rewardEligibleApps.contains(pkg) && currentRewardMinutes > 0)
-        return allowed
+        return RewardAppsManager.isAllowed(pkg, currentRewardMinutes)
     }
 
     fun addToWhitelist(pkg: String, context: Context) {
-        allowedApps.add(pkg)
-        saveAllowedApps(context)
-        // Automatically remove from blacklist when whitelisted
-        removeFromBlacklist(pkg, context)
+        RewardAppsManager.addToWhitelist(pkg, context)
     }
 
     fun removeFromWhitelist(pkg: String, context: Context) {
-        allowedApps.remove(pkg)
-        saveAllowedApps(context)
-    }
-
-    private fun removeFromBlacklist(pkg: String, context: Context) {
-        try {
-            val prefs = context.getSharedPreferences("blacklist_prefs", Context.MODE_PRIVATE)
-            val blacklist = prefs.getStringSet("packages", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-            if (blacklist.remove(pkg)) {
-                prefs.edit().putStringSet("packages", blacklist).apply()
-                Log.d("RewardManager", "Removed $pkg from blacklist (added to whitelist)")
-            }
-        } catch (e: Exception) {
-            Log.e("RewardManager", "Error removing from blacklist", e)
-        }
+        RewardAppsManager.removeFromWhitelist(pkg, context)
     }
 
     fun saveAllowedApps(context: Context) {
-        val prefs = context.getSharedPreferences("whitelist_prefs", Context.MODE_PRIVATE)
-        // Only save permanent apps, not temporary reward apps
-        val permanentApps = allowedApps.filter { !temporaryApps.contains(it) }.toSet()
-        prefs.edit().putStringSet("allowed", permanentApps).apply()
-        // Sync to cloud
-        SettingsManager.syncAppListsToCloudAsync(context)
+        RewardAppsManager.saveAllowedApps(context)
     }
 
     fun loadAllowedApps(context: Context) {
-        val prefs = context.getSharedPreferences("whitelist_prefs", Context.MODE_PRIVATE)
-        val stored = prefs.getStringSet("allowed", null)
-        if (stored != null) {
-            allowedApps.clear()
-            allowedApps.addAll(stored)
-            // Don't reload temporary apps from storage
-        }
-
-        // Always add PokemonGo if it's installed (for launcher display)
-        if (isPackageInstalled(context, "com.nianticlabs.pokemongo")) {
-            allowedApps.add("com.nianticlabs.pokemongo")
-        }
-
-        // Also add Baeren (web app) if it's installed (for launcher display)
-        if (isPackageInstalled(context, "com.talq2me.baeren")) {
-            allowedApps.add("com.talq2me.baeren")
-        }
-
-        // Load user-configured reward-eligible apps
-        val savedRewardApps = SettingsManager.readRewardApps(context)
-        rewardEligibleApps.clear()
-        rewardEligibleApps.addAll(savedRewardApps)
-        Log.d("RewardManager", "Loaded reward eligible apps: $rewardEligibleApps")
-    }
-
-    private fun isPackageInstalled(context: Context, packageName: String): Boolean {
-        return try {
-            context.packageManager.getPackageInfo(packageName, 0)
-            true
-        } catch (e: Exception) {
-            false
-        }
+        RewardAppsManager.loadAllowedApps(context)
+        RewardAppsManager.loadRewardEligibleApps(context)
     }
 
     fun killUnauthorizedBackgroundApps(context: Context) {
@@ -180,7 +110,7 @@ object RewardManager {
             val aggressiveCleanup = SettingsManager.readAggressiveCleanup(context)
 
             if (!aggressiveCleanup) {
-                Log.d("RewardManager", "Aggressive cleanup disabled, skipping background app cleanup")
+                Log.d(TAG, "Aggressive cleanup disabled, skipping background app cleanup")
                 return
             }
 
@@ -220,29 +150,29 @@ object RewardManager {
                 val packageName = process.processName
 
                 // Skip apps that are explicitly whitelisted or are critical system components
+                // (No need to log this - it's expected behavior and happens frequently)
                 if (doNotKillList.contains(packageName) ||
                     packageName.startsWith("com.android.") ||
                     packageName.startsWith("android.")) {
-                    Log.d("RewardManager", "Skipping whitelisted/system app from killing: $packageName")
                     continue
                 }
 
                 // Kill unauthorized background processes
                 try {
-                    Log.d("RewardManager", "Killing unauthorized background app: $packageName")
+                    Log.d(TAG, "Killing unauthorized background app: $packageName")
                     activityManager.killBackgroundProcesses(packageName)
                     killedCount++
                 } catch (e: Exception) {
-                    Log.w("RewardManager", "Failed to kill process $packageName: ${e.message}")
+                    Log.w(TAG, "Failed to kill process $packageName: ${e.message}")
                 }
             }
 
             if (killedCount > 0) {
-                Log.d("RewardManager", "Killed $killedCount unauthorized background apps")
+                Log.d(TAG, "Killed $killedCount unauthorized background apps")
             }
 
         } catch (e: Exception) {
-            Log.e("RewardManager", "Error killing background apps", e)
+            Log.e(TAG, "Error killing background apps", e)
         }
     }
 
@@ -252,7 +182,7 @@ object RewardManager {
             val aggressiveCleanup = SettingsManager.readAggressiveCleanup(context)
 
             if (!aggressiveCleanup) {
-                Log.d("RewardManager", "Aggressive cleanup disabled, skipping background app cleanup")
+                Log.d(TAG, "Aggressive cleanup disabled, skipping background app cleanup")
                 return 0
             }
 
@@ -284,133 +214,48 @@ object RewardManager {
 
                 // Kill unauthorized background processes
                 try {
-                    Log.d("RewardManager", "Killing unauthorized background app: $packageName")
+                    Log.d(TAG, "Killing unauthorized background app: $packageName")
                     activityManager.killBackgroundProcesses(packageName)
                     killedCount++
                 } catch (e: Exception) {
-                    Log.w("RewardManager", "Failed to kill process $packageName: ${e.message}")
+                    Log.w(TAG, "Failed to kill process $packageName: ${e.message}")
                 }
             }
 
             if (killedCount > 0) {
-                Log.d("RewardManager", "Killed $killedCount unauthorized background apps")
+                Log.d(TAG, "Killed $killedCount unauthorized background apps")
             }
 
             return killedCount
 
         } catch (e: Exception) {
-            Log.e("RewardManager", "Error killing background apps", e)
+            Log.e(TAG, "Error killing background apps", e)
             return 0
         }
     }
 
     fun isBackgroundAppAllowed(packageName: String): Boolean {
-        // Allow essential system packages and our memory-whitelisted apps
-        return essentialSystemPackages.contains(packageName) ||
-               packageName.startsWith("com.android.") ||
-               packageName.startsWith("android.") ||
-               memoryAllowedApps.contains(packageName) // Check against the fixed memory whitelist
-               // isAllowed(packageName) // isAllowed is for launcher display, not background memory control
+        return RewardAppsManager.isBackgroundAppAllowed(packageName)
     }
 
     fun addPokemonGoIfInstalled(context: Context) {
-        // This function adds PokemonGo to the launcher's 'allowedApps' (if it's not a reward app)
-        // It does not affect memoryAllowedApps as that's a fixed set.
-        if (isPackageInstalled(context, "com.nianticlabs.pokemongo")) {
-            allowedApps.add("com.nianticlabs.pokemongo")
-            Log.d("RewardManager", "PokemonGo is installed and added to allowed apps for launcher display")
-        }
+        RewardAppsManager.addPokemonGoIfInstalled(context)
     }
 
     fun getAllowedAppsList(): Set<String> {
-        // This returns the set of apps that should be visible in the launcher's whitelist
-        // It includes permanently allowed apps and currently active temporary reward apps.
-        return allowedApps.toSet()
+        return RewardAppsManager.getAllowedAppsList()
     }
 
     fun refreshRewardEligibleApps(context: Context) {
-        val savedRewardApps = SettingsManager.readRewardApps(context)
-        val oldRewardApps = rewardEligibleApps.toSet()
-        rewardEligibleApps.clear()
-        rewardEligibleApps.addAll(savedRewardApps)
-        
-        // Remove newly added reward apps from blacklist
-        savedRewardApps.forEach { pkg ->
-            if (!oldRewardApps.contains(pkg)) {
-                removeFromBlacklist(pkg, context)
-            }
-        }
-        
-        Log.d("RewardManager", "Refreshed reward eligible apps: $rewardEligibleApps")
+        RewardAppsManager.refreshRewardEligibleApps(context)
     }
 
     fun saveRewardMinutes(context: Context) {
-        val prefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
-        val editor = prefs.edit()
-        editor.putInt("current_reward_minutes", currentRewardMinutes)
-        // Save today's date to track daily reset
-        val today = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
-        editor.putLong("last_reward_date", today)
-        
-        // Generate and store timestamp for banked_mins (ISO 8601 format with EST timezone)
-        val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
-        val now = java.util.Date()
-        val offsetMillis = estTimeZone.getOffset(now.time)
-        val offsetHours = offsetMillis / (1000 * 60 * 60)
-        val offsetMinutes = Math.abs((offsetMillis % (1000 * 60 * 60)) / (1000 * 60))
-        val offsetString = String.format("%+03d:%02d", offsetHours, offsetMinutes)
-        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault())
-        dateFormat.timeZone = estTimeZone
-        val timestamp = dateFormat.format(now) + offsetString
-        editor.putString("banked_mins_timestamp", timestamp)
-        
-        editor.apply()
-        Log.d("RewardManager", "Saved reward minutes to SharedPreferences: $currentRewardMinutes, date: $today, timestamp: $timestamp")
-        
-        // Sync to cloud database to keep it accurate (this will also update cloud timestamp)
-        syncRewardMinutesToCloud(context)
-    }
-    
-    /**
-     * Syncs current reward minutes to cloud user_data table
-     * This ensures that if we sync from cloud, we get the accurate remaining reward time
-     */
-    private fun syncRewardMinutesToCloud(context: Context) {
-        Log.d("RewardManager", "Syncing $currentRewardMinutes reward minutes to cloud...")
-        // Use SettingsManager's coroutine scope to sync asynchronously
-        com.talq2me.baerenlock.SettingsManager.syncRewardMinutesToCloudAsync(context, currentRewardMinutes)
+        RewardStorage.saveRewardMinutes(context)
     }
 
     fun loadRewardMinutes(context: Context) {
-        val prefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
-        
-        // Check if we need to reset for a new day
-        val today = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
-        
-        val lastRewardDate = prefs.getLong("last_reward_date", 0L)
-        
-        // Reset to 0 if it's a new day (including first time load when lastRewardDate is 0L)
-        if (lastRewardDate != today) {
-            // It's a new day - reset reward minutes to 0
-            Log.d("RewardManager", "New day detected (last: $lastRewardDate, today: $today). Resetting reward minutes to 0.")
-            currentRewardMinutes = 0
-            saveRewardMinutes(context) // This will also update the date
-        } else {
-            // Same day - load the saved minutes
-            currentRewardMinutes = prefs.getInt("current_reward_minutes", 0)
-            Log.d("RewardManager", "Loaded reward minutes from SharedPreferences: $currentRewardMinutes (same day)")
-        }
-        
+        val wasLoaded = RewardStorage.loadRewardMinutes(context)
         if (currentRewardMinutes > 0) {
             startRewardTimer(context)
         }
@@ -438,11 +283,11 @@ object RewardManager {
             lastRewardDecrementTime = now
             lastUsageCheckTime = now
             
-            Log.d("RewardManager", "Updated start minutes: added $addedMinutes, actual usage was $actualUsageMinutes, new start: $rewardTimeStartMinutes minutes")
+            Log.d(TAG, "Updated start minutes: added $addedMinutes, actual usage was $actualUsageMinutes, new start: $rewardTimeStartMinutes minutes")
         } else {
             // No active session, just set the start values
             rewardTimeStartMinutes = currentRewardMinutes
-            Log.d("RewardManager", "Set start minutes for new session: $rewardTimeStartMinutes minutes")
+            Log.d(TAG, "Set start minutes for new session: $rewardTimeStartMinutes minutes")
         }
     }
 
@@ -451,9 +296,7 @@ object RewardManager {
      * This prevents double-counting when both Intent and Broadcast are received.
      */
     fun isTransactionProcessed(context: Context, transactionId: Long): Boolean {
-        val prefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
-        val processedIds = prefs.getStringSet("processed_transaction_ids", mutableSetOf()) ?: mutableSetOf()
-        return processedIds.contains(transactionId.toString())
+        return RewardStorage.isTransactionProcessed(context, transactionId)
     }
 
     /**
@@ -461,26 +304,7 @@ object RewardManager {
      * Also cleans up old transaction IDs (older than 24 hours) to prevent unbounded growth.
      */
     fun markTransactionProcessed(context: Context, transactionId: Long) {
-        val prefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
-        val processedIds = mutableSetOf<String>()
-        processedIds.addAll(prefs.getStringSet("processed_transaction_ids", mutableSetOf()) ?: mutableSetOf())
-        
-        // Add the new transaction ID
-        processedIds.add(transactionId.toString())
-        
-        // Clean up old transaction IDs (older than 24 hours)
-        val currentTime = System.currentTimeMillis()
-        val oneDayInMillis = 24 * 60 * 60 * 1000L
-        val cleanedIds = processedIds.filter { id ->
-            val idTime = id.toLongOrNull() ?: 0L
-            currentTime - idTime < oneDayInMillis
-        }.toSet()
-        
-        prefs.edit()
-            .putStringSet("processed_transaction_ids", cleanedIds)
-            .apply()
-        
-        Log.d("RewardManager", "Marked transaction ID $transactionId as processed. Total tracked: ${cleanedIds.size}")
+        RewardStorage.markTransactionProcessed(context, transactionId)
     }
 
     // Track the last known foreground app (updated by AppBlockerService or our own checks)
@@ -492,14 +316,21 @@ object RewardManager {
      */
     fun updateForegroundApp(packageName: String?) {
         if (packageName != null) {
+            // Only log if the package name actually changed
+            val packageChanged = lastKnownForegroundApp != packageName
+            if (packageChanged) {
+                Log.d(TAG, "Updated last known foreground app: $lastKnownForegroundApp -> $packageName")
+            }
+            
             lastKnownForegroundApp = packageName
             lastForegroundAppUpdateTime = System.currentTimeMillis()
-            Log.d("RewardManager", "Updated last known foreground app: $packageName")
             
             // Track app usage if reward session is active
             if (rewardSessionActive && currentRewardMinutes > 0) {
                 usageTracker?.onAppForeground(packageName)
-                Log.d("RewardManager", "Tracking foreground app during reward time: $packageName")
+                if (packageChanged) {
+                    Log.d(TAG, "Tracking foreground app during reward time: $packageName")
+                }
             }
         }
     }
@@ -512,9 +343,9 @@ object RewardManager {
             usageTracker = RewardUsageTracker(context)
             usageTracker?.startRewardSession()
             rewardSessionActive = true
-            Log.d("RewardManager", "Started reward session tracking")
+            Log.d(TAG, "Started reward session tracking")
         } else {
-            Log.d("RewardManager", "Reward session tracking already active, skipping start")
+            Log.d(TAG, "Reward session tracking already active, skipping start")
         }
     }
     
@@ -522,14 +353,14 @@ object RewardManager {
      * Ends reward session tracking and returns the usage data
      */
     fun endRewardSessionTracking(): Pair<List<RewardUsageTracker.AppUsageSession>, RewardUsageTracker.RewardSessionSummary>? {
-        Log.d("RewardManager", "endRewardSessionTracking called. rewardSessionActive=$rewardSessionActive, usageTracker=${usageTracker != null}")
+        Log.d(TAG, "endRewardSessionTracking called. rewardSessionActive=$rewardSessionActive, usageTracker=${usageTracker != null}")
         if (rewardSessionActive && usageTracker != null) {
             val sessions = usageTracker!!.endRewardSession()
             val summary = usageTracker!!.getSessionSummary()
             
-            Log.d("RewardManager", "Ended reward session. Sessions: ${sessions.size}, Total time: ${summary.totalTimeSeconds}s, Unique apps: ${summary.uniqueApps}")
+            Log.d(TAG, "Ended reward session. Sessions: ${sessions.size}, Total time: ${summary.totalTimeSeconds}s, Unique apps: ${summary.uniqueApps}")
             sessions.forEach { session ->
-                Log.d("RewardManager", "  - ${session.appName} (${session.packageName}): ${session.formattedDuration}")
+                Log.d(TAG, "  - ${session.appName} (${session.packageName}): ${session.formattedDuration}")
             }
             
             // Store for report generation
@@ -538,10 +369,10 @@ object RewardManager {
             
             rewardSessionActive = false
             usageTracker = null
-            Log.d("RewardManager", "Stored usage data in lastRewardSessions and lastRewardSummary")
+            Log.d(TAG, "Stored usage data in lastRewardSessions and lastRewardSummary")
             return Pair(sessions, summary)
         } else {
-            Log.w("RewardManager", "Cannot end reward session tracking: rewardSessionActive=$rewardSessionActive, usageTracker=${usageTracker != null}")
+            Log.w(TAG, "Cannot end reward session tracking: rewardSessionActive=$rewardSessionActive, usageTracker=${usageTracker != null}")
         }
         return null
     }
@@ -564,7 +395,7 @@ object RewardManager {
             }
             mode == AppOpsManager.MODE_ALLOWED
         } catch (e: Exception) {
-            Log.w("RewardManager", "Error checking UsageStats permission: ${e.message}")
+            Log.w(TAG, "Error checking UsageStats permission: ${e.message}")
             false
         }
     }
@@ -577,9 +408,11 @@ object RewardManager {
         // Method 1: Check last known foreground app (updated by AppBlockerService or previous checks)
         // Use it if it was updated recently (within last 5 seconds)
         val now = System.currentTimeMillis()
+        val rewardEligibleAppsSet = rewardEligibleAppsSet
+        
         if (lastKnownForegroundApp != null && (now - lastForegroundAppUpdateTime) < 5000) {
-            if (rewardEligibleApps.contains(lastKnownForegroundApp)) {
-                Log.d("RewardManager", "Reward app is in foreground (from cached state): $lastKnownForegroundApp")
+            if (rewardEligibleAppsSet.contains(lastKnownForegroundApp)) {
+                Log.d(TAG, "Reward app is in foreground (from cached state): $lastKnownForegroundApp")
                 return true
             }
         }
@@ -606,15 +439,15 @@ object RewardManager {
                 }
                 
                 // Check if the foreground app is a reward-eligible app
-                if (lastForegroundApp != null && rewardEligibleApps.contains(lastForegroundApp)) {
-                    Log.d("RewardManager", "Reward app is in foreground (via UsageStats): $lastForegroundApp")
+                if (lastForegroundApp != null && rewardEligibleAppsSet.contains(lastForegroundApp)) {
+                    Log.d(TAG, "Reward app is in foreground (via UsageStats): $lastForegroundApp")
                     return true
                 }
             } catch (e: Exception) {
-                Log.w("RewardManager", "Error using UsageStatsManager: ${e.message}")
+                Log.w(TAG, "Error using UsageStatsManager: ${e.message}")
             }
         } else {
-            Log.w("RewardManager", "UsageStats permission not granted - cannot reliably detect foreground apps")
+            Log.w(TAG, "UsageStats permission not granted - cannot reliably detect foreground apps")
         }
         
         // Method 3: Fallback to ActivityManager (less reliable but doesn't require special permission)
@@ -628,18 +461,18 @@ object RewardManager {
                         // Update our cached state
                         updateForegroundApp(pkgName)
                         
-                        if (rewardEligibleApps.contains(pkgName)) {
-                            Log.d("RewardManager", "Reward app is in foreground (via ActivityManager): $pkgName")
+                        if (rewardEligibleAppsSet.contains(pkgName)) {
+                            Log.d(TAG, "Reward app is in foreground (via ActivityManager): $pkgName")
                             return true
                         }
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.w("RewardManager", "Error checking foreground app via ActivityManager: ${e.message}")
+            Log.w(TAG, "Error checking foreground app via ActivityManager: ${e.message}")
         }
         
-        Log.d("RewardManager", "No reward app detected in foreground")
+        Log.d(TAG, "No reward app detected in foreground")
         return false
     }
 
@@ -649,11 +482,11 @@ object RewardManager {
      * Falls back to timer-based tracking if UsageStats permission is not available.
      */
     fun startRewardTimer(context: Context) {
-        Log.d("RewardManager", "startRewardTimer called. Current minutes: $currentRewardMinutes, timer already running: ${rewardRunnable != null}")
+        Log.d(TAG, "startRewardTimer called. Current minutes: $currentRewardMinutes, timer already running: ${rewardRunnable != null}")
         
         // If timer is already running and we have reward minutes, don't restart it
         if (rewardRunnable != null && currentRewardMinutes > 0) {
-            Log.d("RewardManager", "Timer already running with $currentRewardMinutes minutes, skipping restart")
+            Log.d(TAG, "Timer already running with $currentRewardMinutes minutes, skipping restart")
             return
         }
         
@@ -666,12 +499,12 @@ object RewardManager {
             rewardTimeStartTime = currentTime
             rewardTimeStartMinutes = currentRewardMinutes
             lastUsageCheckTime = currentTime
-            Log.d("RewardManager", "Initialized reward timer tracking for new session. Start time: $currentTime, Start minutes: $rewardTimeStartMinutes")
+            Log.d(TAG, "Initialized reward timer tracking for new session. Start time: $currentTime, Start minutes: $rewardTimeStartMinutes")
             
             // Start reward session tracking for usage reporting
             startRewardSessionTracking(context)
         } else {
-            Log.d("RewardManager", "Timer already running, continuing existing session. Last decrement: $lastRewardDecrementTime")
+            Log.d(TAG, "Timer already running, continuing existing session. Last decrement: $lastRewardDecrementTime")
         }
         
         // Always remove any existing callbacks to prevent duplicate timers
@@ -682,100 +515,127 @@ object RewardManager {
             override fun run() {
                 if (currentRewardMinutes > 0) {
                     val now = System.currentTimeMillis()
+                    val oneMinuteInMillis = 60 * 1000L
+                    var shouldSave = false
                     
-                    // Try to use UsageStatsManager for accurate tracking (if permission available)
+                    // BULLETPROOF APPROACH: Use elapsed time since timer started as PRIMARY mechanism
+                    // This ensures we always decrement correctly even if foreground detection fails
+                    val timeSinceStart = now - rewardTimeStartTime
+                    val elapsedMinutes = (timeSinceStart / oneMinuteInMillis).toInt()
+                    val expectedMinutesRemaining = rewardTimeStartMinutes - elapsedMinutes
+                    
+                    // Try to use UsageStatsManager for validation/adjustment (if permission available)
                     if (hasUsageStatsPermission(context)) {
-                        // Only calculate usage if enough time has passed since timer started
-                        // This prevents counting historical usage data when timer first starts
-                        val timeSinceStart = now - rewardTimeStartTime
-                        val minimumTimeForUsageCheck = 30 * 1000L // Wait at least 30 seconds before checking UsageStats
+                        // Wait at least 30 seconds before checking UsageStats to avoid historical data
+                        val minimumTimeForUsageCheck = 30 * 1000L
                         
                         if (timeSinceStart >= minimumTimeForUsageCheck) {
                             val actualUsageMinutes = getActualRewardAppUsageMinutes(context, rewardTimeStartTime, now)
-                            val expectedMinutesUsed = rewardTimeStartMinutes - currentRewardMinutes
-                            val actualMinutesUsed = actualUsageMinutes
+                            val maxPossibleUsageMinutes = ((timeSinceStart / oneMinuteInMillis) + 1).toInt()
+                            val safeActualUsage = actualUsageMinutes.coerceAtMost(maxPossibleUsageMinutes)
                             
-                            Log.d("RewardManager", "UsageStats check: timeSinceStart=${timeSinceStart/1000}s, actualUsage=$actualMinutesUsed min, expected=$expectedMinutesUsed min, current=$currentRewardMinutes min, start=$rewardTimeStartMinutes min")
+                            // Use UsageStats value if available, but ensure we don't go below elapsed time
+                            val usageBasedRemaining = rewardTimeStartMinutes - safeActualUsage
+                            val timeBasedRemaining = expectedMinutesRemaining
                             
-                            // Safety check: Don't allow UsageStats to reduce minutes more than the time that has actually passed
-                            // This prevents historical usage data from incorrectly reducing minutes
-                            val maxPossibleUsageMinutes = ((timeSinceStart / (60 * 1000L)) + 1).toInt() // Round up to be safe
-                            val safeActualUsage = actualMinutesUsed.coerceAtMost(maxPossibleUsageMinutes)
+                            // Use the lower of the two (more conservative - ensures we don't give extra time)
+                            val newCurrentMinutes = minOf(usageBasedRemaining, timeBasedRemaining).coerceAtLeast(0)
                             
-                            if (actualMinutesUsed > maxPossibleUsageMinutes) {
-                                Log.w("RewardManager", "UsageStats returned $actualMinutesUsed minutes but only ${timeSinceStart/1000}s (${maxPossibleUsageMinutes} max) have passed. Using safe value: $safeActualUsage")
-                            }
-                            
-                            // Update current minutes based on actual usage (using safe value)
-                            val newCurrentMinutes = rewardTimeStartMinutes - safeActualUsage
                             if (newCurrentMinutes != currentRewardMinutes) {
-                                val difference = currentRewardMinutes - newCurrentMinutes
-                                if (difference > 0) {
-                                    Log.d("RewardManager", "UsageStats: Actual usage shows $safeActualUsage minutes used (expected: $expectedMinutesUsed). Adjusting from $currentRewardMinutes to $newCurrentMinutes minutes")
-                                }
-                                currentRewardMinutes = newCurrentMinutes.coerceAtLeast(0)
-                                saveRewardMinutes(context)
+                                Log.d(TAG, "UsageStats: elapsed=${timeSinceStart/1000}s, elapsedMinutes=$elapsedMinutes, actualUsage=$safeActualUsage min, expectedRemaining=$timeBasedRemaining, usageRemaining=$usageBasedRemaining, updating from $currentRewardMinutes to $newCurrentMinutes minutes")
+                                currentRewardMinutes = newCurrentMinutes
+                                shouldSave = true
                                 lastUsageCheckTime = now
+                            } else {
+                                // Even if value hasn't changed, save periodically (every minute) as safety net
+                                val timeSinceLastSave = now - lastUsageCheckTime
+                                if (timeSinceLastSave >= oneMinuteInMillis) {
+                                    shouldSave = true
+                                    lastUsageCheckTime = now
+                                    // Only log periodic saves every 5 minutes to reduce log spam
+                                    if (now - lastPeriodicSaveLogTime >= 5 * oneMinuteInMillis) {
+                                        Log.d(TAG, "Periodic save (UsageStats): elapsed=${timeSinceStart/1000}s, current=$currentRewardMinutes minutes")
+                                        lastPeriodicSaveLogTime = now
+                                    }
+                                }
                             }
                         } else {
-                            // Too soon to check UsageStats, just log and continue
-                            Log.d("RewardManager", "UsageStats check skipped: only ${timeSinceStart/1000}s since timer started (need ${minimumTimeForUsageCheck/1000}s). Current minutes: $currentRewardMinutes")
+                            // Too soon for UsageStats - use elapsed time only, but still save periodically
+                            val newCurrentMinutes = expectedMinutesRemaining.coerceAtLeast(0)
+                            val previousMinutes = currentRewardMinutes
+                            if (newCurrentMinutes != currentRewardMinutes) {
+                                currentRewardMinutes = newCurrentMinutes
+                                shouldSave = true
+                                Log.d(TAG, "Early timer: elapsed=${timeSinceStart/1000}s, updating from $previousMinutes to $newCurrentMinutes minutes")
+                            }
+                            // Still do periodic save even if value unchanged
+                            val timeSinceLastSave = now - lastUsageCheckTime
+                            if (timeSinceLastSave >= oneMinuteInMillis) {
+                                shouldSave = true
+                                lastUsageCheckTime = now
+                                // Only log periodic saves every 5 minutes to reduce log spam
+                                if (now - lastPeriodicSaveLogTime >= 5 * oneMinuteInMillis) {
+                                    Log.d(TAG, "Periodic save (early timer): elapsed=${timeSinceStart/1000}s, current=$currentRewardMinutes minutes")
+                                    lastPeriodicSaveLogTime = now
+                                }
+                            }
                         }
                     } else {
-                        // Fallback to timer-based tracking if UsageStats not available
-                        val timeSinceLastDecrement = now - lastRewardDecrementTime
-                        val oneMinuteInMillis = 60 * 1000L
+                        // Fallback: Timer-based tracking - BULLETPROOF: Use elapsed time as PRIMARY mechanism
+                        // When reward time is active (timer running), decrement based on elapsed time
+                        // The timer being active means reward apps were granted access, so we count the time
+                        // This ensures we NEVER get out of sync even if foreground detection fails
+                        val newCurrentMinutes = expectedMinutesRemaining.coerceAtLeast(0)
+                        val previousMinutes = currentRewardMinutes
+                        val isRewardAppActive = isRewardAppInForeground(context)
                         
-                        // Only decrement if a reward app is actually in the foreground
-                        // AND at least 1 minute has elapsed since last decrement
-                        if (isRewardAppInForeground(context)) {
-                            if (timeSinceLastDecrement >= oneMinuteInMillis) {
-                                // Calculate how many full minutes have elapsed
-                                val minutesToDecrement = (timeSinceLastDecrement / oneMinuteInMillis).toInt()
-                                currentRewardMinutes -= minutesToDecrement
-                                if (currentRewardMinutes < 0) currentRewardMinutes = 0
-                                
-                                // Update the last decrement time to account for the time we just decremented
-                                lastRewardDecrementTime += (minutesToDecrement * oneMinuteInMillis)
-                                
-                                saveRewardMinutes(context)
-                                Log.d("RewardManager", "Reward app in foreground - decremented $minutesToDecrement minute(s). Remaining: $currentRewardMinutes minutes")
-                            } else {
-                                // Not enough time has passed yet, but app is in foreground
-                                val secondsRemaining = ((oneMinuteInMillis - timeSinceLastDecrement) / 1000).toInt()
-                                Log.d("RewardManager", "Reward app in foreground - $secondsRemaining seconds until next decrement (remaining: $currentRewardMinutes minutes)")
-                            }
-                        } else {
-                            // No reward app in foreground - don't decrement, but update last decrement time
-                            // to prevent accumulating time when app is not in foreground
-                            lastRewardDecrementTime = now
-                            Log.d("RewardManager", "No reward app in foreground - skipping decrement (remaining: $currentRewardMinutes minutes)")
+                        // ALWAYS update based on elapsed time - this is bulletproof
+                        // The timer running means reward time was granted, so we count elapsed time
+                        if (newCurrentMinutes != currentRewardMinutes) {
+                            currentRewardMinutes = newCurrentMinutes
+                            shouldSave = true
+                            Log.d(TAG, "Timer-based: elapsed=${timeSinceStart/1000}s, elapsedMinutes=$elapsedMinutes, rewardAppActive=$isRewardAppActive, updating from $previousMinutes to $newCurrentMinutes minutes")
                         }
+                        
+                        // ALWAYS save every minute as a safety net to prevent sync issues
+                        val timeSinceLastSave = now - lastRewardDecrementTime
+                        if (timeSinceLastSave >= oneMinuteInMillis) {
+                            shouldSave = true
+                            lastRewardDecrementTime = now
+                            // Only log periodic saves every 5 minutes to reduce log spam
+                            if (now - lastPeriodicSaveLogTime >= 5 * oneMinuteInMillis) {
+                                Log.d(TAG, "Periodic save (timer-based): elapsed=${timeSinceStart/1000}s, current=$currentRewardMinutes minutes")
+                                lastPeriodicSaveLogTime = now
+                            }
+                        }
+                    }
+                    
+                    // Save to local storage and cloud if we need to
+                    if (shouldSave) {
+                        saveRewardMinutes(context)
                     }
 
                     if (currentRewardMinutes == 0) {
                         // Reward time is up, remove temporary apps
-                        allowedApps.removeAll(temporaryApps)
-                        temporaryApps.clear()
-                        saveAllowedApps(context)
-                        Log.d("RewardManager", "Reward time expired. Temporary apps removed. Killing reward apps.")
+                        RewardAppsManager.clearTemporaryApps(context)
+                        Log.d(TAG, "Reward time expired. Temporary apps removed. Killing reward apps.")
 
                         // End reward session tracking and send broadcast with usage data
                         val usageData = endRewardSessionTracking()
-                        Log.d("RewardManager", "Reward time expired. Usage data: ${if (usageData != null) "available (${usageData.first.size} sessions)" else "null"}")
+                        Log.d(TAG, "Reward time expired. Usage data: ${if (usageData != null) "available (${usageData.first.size} sessions)" else "null"}")
                         
                         val intent = Intent(LauncherActivity.ACTION_REWARD_EXPIRED).apply {
                             putExtra("has_usage_data", usageData != null)
                         }
                         androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
-                        Log.d("RewardManager", "Sent ACTION_REWARD_EXPIRED broadcast.")
+                        Log.d(TAG, "Sent ACTION_REWARD_EXPIRED broadcast.")
                         
                         // Also send a separate broadcast for report generation
                         if (usageData != null) {
-                            Log.d("RewardManager", "Usage data available: ${usageData.first.size} sessions, total time: ${usageData.second.totalTimeSeconds}s")
+                            Log.d(TAG, "Usage data available: ${usageData.first.size} sessions, total time: ${usageData.second.totalTimeSeconds}s")
                             val reportIntent = Intent("com.talq2me.baerenlock.ACTION_GENERATE_REWARD_REPORT")
                             androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(context).sendBroadcast(reportIntent)
-                            Log.d("RewardManager", "Sent ACTION_GENERATE_REWARD_REPORT broadcast via LocalBroadcastManager")
+                            Log.d(TAG, "Sent ACTION_GENERATE_REWARD_REPORT broadcast via LocalBroadcastManager")
                             
                             // Also start MainActivity to ensure it's running to receive the broadcast
                             // This is a fallback in case MainActivity isn't running
@@ -785,26 +645,15 @@ object RewardManager {
                                     putExtra("trigger_report_upload", true)
                                 }
                                 context.startActivity(mainActivityIntent)
-                                Log.d("RewardManager", "Started MainActivity to ensure report upload can happen")
+                                Log.d(TAG, "Started MainActivity to ensure report upload can happen")
                             } catch (e: Exception) {
-                                Log.e("RewardManager", "Failed to start MainActivity for report upload: ${e.message}", e)
+                                Log.e(TAG, "Failed to start MainActivity for report upload: ${e.message}", e)
                             }
                         } else {
-                            Log.w("RewardManager", "No usage data available - skipping report generation")
+                            Log.w(TAG, "No usage data available - skipping report generation")
                         }
 
-                        // Kill reward-eligible apps that were granted access
-                        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-                        for (pkg in rewardEligibleApps) {
-                            try {
-                                am.killBackgroundProcesses(pkg)
-                                Log.d("RewardManager", "Killed reward-eligible app: $pkg")
-                            } catch (e: Exception) {
-                                Log.w("RewardManager", "Failed to kill reward-eligible app $pkg: ${e.message}")
-                            }
-                        }
-
-                        // Force return to BaerenLock launcher
+                        // Force return to BaerenLock launcher FIRST (moves reward apps to background)
                         try {
                             // First, try to go home using the HOME intent (most reliable)
                             val homeIntent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
@@ -814,7 +663,7 @@ object RewardManager {
                                         android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
                             }
                             context.startActivity(homeIntent)
-                            Log.d("RewardManager", "Launched HOME intent to return to BaerenLock launcher")
+                            Log.d(TAG, "Launched HOME intent to return to BaerenLock launcher")
                             
                             // Also try to start our launcher directly as backup (after a short delay)
                             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
@@ -826,15 +675,34 @@ object RewardManager {
                                                 android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
                                     }
                                     context.startActivity(launcherIntent)
-                                    Log.d("RewardManager", "Launched LauncherActivity directly as backup")
+                                    Log.d(TAG, "Launched LauncherActivity directly as backup")
                                 } catch (e: Exception) {
-                                    Log.e("RewardManager", "Failed to start launcher directly: ${e.message}", e)
+                                    Log.e(TAG, "Failed to start launcher directly: ${e.message}", e)
                                 }
                             }, 200) // 200ms delay to let HOME intent process first
                             
                         } catch (e: Exception) {
-                            Log.e("RewardManager", "Failed to return to launcher after reward expiration: ${e.message}", e)
+                            Log.e(TAG, "Failed to return to launcher after reward expiration: ${e.message}", e)
                         }
+                        
+                        // Kill reward-eligible apps AFTER returning to launcher (gives time for apps to move to background)
+                        // Use a delay to ensure the HOME intent has processed and apps are in background
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                            
+                            for (pkg in rewardEligibleAppsSet) {
+                                try {
+                                    // Kill background processes (apps should now be in background after HOME intent)
+                                    am.killBackgroundProcesses(pkg)
+                                    Log.d(TAG, "Killed reward-eligible app: $pkg")
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Failed to kill reward-eligible app $pkg: ${e.message}")
+                                }
+                            }
+                            
+                            // AppBlockerService will block these apps if they try to restart (since currentRewardMinutes == 0)
+                            Log.d(TAG, "Reward apps killed. AppBlockerService will block them if they try to restart.")
+                        }, 500) // 500ms delay to ensure HOME intent processed and apps moved to background
 
                         // Stop the timer since reward time is 0
                         rewardTimer?.removeCallbacks(this)
@@ -843,7 +711,8 @@ object RewardManager {
                         rewardTimeStartTime = 0L
                         rewardTimeStartMinutes = 0
                         lastUsageCheckTime = 0L
-                        Log.d("RewardManager", "Reward timer stopped as minutes reached 0.")
+                        lastPeriodicSaveLogTime = 0L
+                        Log.d(TAG, "Reward timer stopped as minutes reached 0.")
                         
                         // Trigger report generation if we have usage data
                         if (usageData != null && context is android.app.Activity) {
@@ -867,14 +736,15 @@ object RewardManager {
                     rewardTimeStartTime = 0L
                     rewardTimeStartMinutes = 0
                     lastUsageCheckTime = 0L
-                    Log.d("RewardManager", "Reward timer stopped.")
+                    lastPeriodicSaveLogTime = 0L
+                    Log.d(TAG, "Reward timer stopped.")
                 }
             }
         }
 
         // Start the runnable immediately to process the current state and then schedule for future
         rewardTimer?.post(rewardRunnable!!)
-        Log.d("RewardManager", "Reward timer initiated. First run scheduled immediately.")
+        Log.d(TAG, "Reward timer initiated. First run scheduled immediately.")
     }
 
     /**
@@ -890,7 +760,7 @@ object RewardManager {
         // This prevents counting historical usage when timer first starts
         val timeRange = endTime - startTime
         if (timeRange < 30 * 1000L) {
-            Log.d("RewardManager", "UsageStats query skipped: time range too small (${timeRange/1000}s), returning 0")
+            Log.d(TAG, "UsageStats query skipped: time range too small (${timeRange/1000}s), returning 0")
             return 0
         }
         
@@ -898,10 +768,8 @@ object RewardManager {
             val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
             var totalUsageMillis = 0L
             
-            Log.d("RewardManager", "Querying UsageStats from ${java.util.Date(startTime)} to ${java.util.Date(endTime)} (${timeRange/1000}s range)")
-            
             // Query usage stats for each reward-eligible app
-            for (packageName in rewardEligibleApps) {
+            for (packageName in rewardEligibleAppsSet) {
                 try {
                     val usageStats = usm.queryUsageStats(
                         UsageStatsManager.INTERVAL_BEST,
@@ -913,21 +781,24 @@ object RewardManager {
                         for (stat in usageStats) {
                             if (stat.packageName == packageName) {
                                 totalUsageMillis += stat.totalTimeInForeground
-                                Log.d("RewardManager", "UsageStats for $packageName: ${stat.totalTimeInForeground / 1000} seconds")
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w("RewardManager", "Error querying usage stats for $packageName: ${e.message}")
+                    Log.w(TAG, "Error querying usage stats for $packageName: ${e.message}")
                 }
             }
             
             // Convert to minutes (round down)
             val usageMinutes = (totalUsageMillis / (60 * 1000)).toInt()
-            Log.d("RewardManager", "Total actual usage: $usageMinutes minutes (${totalUsageMillis / 1000} seconds) over ${timeRange/1000}s period")
+            // Only log detailed stats every 5 minutes to reduce log spam (queries happen every 5 seconds)
+            val minutesSinceStart = (timeRange / (60 * 1000L)).toInt()
+            if (minutesSinceStart > 0 && minutesSinceStart % 5 == 0) {
+                Log.d(TAG, "UsageStats query: ${minutesSinceStart}min elapsed, $usageMinutes minutes used (${totalUsageMillis / 1000}s) over ${timeRange/1000}s period")
+            }
             return usageMinutes
         } catch (e: Exception) {
-            Log.e("RewardManager", "Error getting actual usage from UsageStatsManager: ${e.message}", e)
+            Log.e(TAG, "Error getting actual usage from UsageStatsManager: ${e.message}", e)
             return 0
         }
     }

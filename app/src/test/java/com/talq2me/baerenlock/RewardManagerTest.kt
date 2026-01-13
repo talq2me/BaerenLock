@@ -31,13 +31,15 @@ class RewardManagerTest {
         
         // Reset RewardManager state
         RewardManager.currentRewardMinutes = 0
-        RewardManager.allowedApps.clear()
-        RewardManager.rewardEligibleApps.clear()
         
         // Clear SharedPreferences to ensure clean state
         context.getSharedPreferences("whitelist_prefs", Context.MODE_PRIVATE).edit().clear().apply()
         context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE).edit().clear().apply()
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().clear().apply()
+        
+        // Reset RewardAppsManager state by clearing stored data
+        RewardManager.loadAllowedApps(context)
+        RewardManager.loadRewardMinutes(context)
         
         // Get real SharedPreferences for testing
         mockSharedPreferences = context.getSharedPreferences("whitelist_prefs", Context.MODE_PRIVATE)
@@ -70,7 +72,7 @@ class RewardManagerTest {
     @Test
     fun `isAllowed returns true for permanently allowed app`() {
         val packageName = "com.example.app"
-        RewardManager.allowedApps.add(packageName)
+        RewardManager.addToWhitelist(packageName, context)
 
         assertTrue("App should be allowed", RewardManager.isAllowed(packageName))
     }
@@ -87,7 +89,10 @@ class RewardManagerTest {
     @Test
     fun `isAllowed returns true for reward-eligible app with active minutes`() {
         val packageName = "com.example.app"
-        RewardManager.rewardEligibleApps.add(packageName)
+        // Add to reward eligible apps via settings
+        val settingsPrefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        settingsPrefs.edit().putStringSet("reward_apps", setOf(packageName)).apply()
+        RewardManager.refreshRewardEligibleApps(context)
         RewardManager.currentRewardMinutes = 5
 
         assertTrue("Reward app should be allowed with active minutes", RewardManager.isAllowed(packageName))
@@ -97,12 +102,14 @@ class RewardManagerTest {
     fun `isAllowed returns false for reward-eligible app with no minutes`() {
         val packageName = "com.test.reward.app.no.minutes.unique.${System.currentTimeMillis()}"
         
-        // Clear any existing state for this package
-        RewardManager.allowedApps.remove(packageName)
+        // Remove from whitelist if present
+        RewardManager.removeFromWhitelist(packageName, context)
         
         // Set up: package is reward-eligible but minutes are 0
-        RewardManager.rewardEligibleApps.clear() // Clear all first
-        RewardManager.rewardEligibleApps.add(packageName)
+        // Add to reward eligible apps via settings
+        val settingsPrefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        settingsPrefs.edit().putStringSet("reward_apps", setOf(packageName)).apply()
+        RewardManager.refreshRewardEligibleApps(context)
         RewardManager.currentRewardMinutes = 0
         
         // Verify the state before testing
@@ -131,7 +138,7 @@ class RewardManagerTest {
     @Test
     fun `removeFromWhitelist removes app from allowed set`() {
         val packageName = "com.example.app"
-        RewardManager.allowedApps.add(packageName)
+        RewardManager.addToWhitelist(packageName, context)
 
         RewardManager.removeFromWhitelist(packageName, context)
 
@@ -187,14 +194,24 @@ class RewardManagerTest {
 
     @Test
     fun `getAllowedAppsList returns copy of allowed apps`() {
-        RewardManager.allowedApps.add("com.app1")
-        RewardManager.allowedApps.add("com.app2")
+        // Clear existing apps first to get clean state
+        val existingApps = RewardManager.allowedApps.toSet()
+        existingApps.forEach { 
+            if (it != "com.talq2me.baerened" && it != "com.talq2me.baerenlock") {
+                RewardManager.removeFromWhitelist(it, context)
+            }
+        }
+        
+        // Add apps using the proper method
+        RewardManager.addToWhitelist("com.app1", context)
+        RewardManager.addToWhitelist("com.app2", context)
 
         val result = RewardManager.getAllowedAppsList()
 
-        assertEquals("Should return all allowed apps", 2, result.size)
+        // The result should contain at least our 2 apps (might have more like default apps)
         assertTrue("Should contain app1", result.contains("com.app1"))
         assertTrue("Should contain app2", result.contains("com.app2"))
+        assertTrue("Should return at least 2 apps", result.size >= 2)
     }
 
     @Test

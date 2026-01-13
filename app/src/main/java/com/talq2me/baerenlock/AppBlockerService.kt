@@ -49,30 +49,38 @@ class AppBlockerService : AccessibilityService() {
     }
 
     private lateinit var devicePolicyManager: com.talq2me.baerenlock.DevicePolicyManager
-    private var blockedPackages = mutableSetOf<String>()
     private var chromeJeLisUrl: String? = null // Track if Chrome is viewing JeLis
     private var chromeLaunchedFromBaerenEd: Boolean = false // Track if Chrome was launched from BaerenEd
+    
+    // Track last event time to detect if service is not receiving events
+    private var lastEventTime: Long = 0
+    private val healthCheckRunnable = object : Runnable {
+        override fun run() {
+            checkServiceHealth()
+            backgroundHandler.postDelayed(this, 60000) // Check every minute
+        }
+    }
 
     private val CHANNEL_ID = "AppBlockerServiceChannel"
     private val NOTIFICATION_ID = 1
 
     override fun onCreate() {
         super.onCreate()
-        Log.d("AppBlocker", "🚀 AppBlockerService onCreate() - service starting")
+        Log.d("AppBlocker", "AppBlockerService onCreate() - service starting")
         createNotificationChannel()
 
         backgroundThread = HandlerThread("AppBlockerBackground").apply {
             start()
         }
         backgroundHandler = Handler(backgroundThread.looper)
-        Log.d("AppBlocker", "✅ AppBlockerService initialized - ready to track apps")
+        lastEventTime = System.currentTimeMillis()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        // Log all events for debugging
-        Log.d("AppBlocker", "Event received: type=${event.eventType}, package=${event.packageName}, class=${event.className}")
+        // Update last event time to indicate service is receiving events
+        lastEventTime = System.currentTimeMillis()
         
-        // Listen to more event types to catch all app switches
+        // Only process relevant event types to reduce overhead
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && 
             event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_VIEW_FOCUSED) {
@@ -103,8 +111,7 @@ class AppBlockerService : AccessibilityService() {
 
         // Check if this app should be blocked
         if (shouldBlockApp(pkgName)) {
-            Log.d("AppBlocker", "🚫 BLOCKING app: $pkgName - returning to launcher")
-            Log.d("AppBlocker", "Blocking reason: blacklist=${getBlacklist().contains(pkgName)}, rewardApp=${RewardManager.rewardEligibleApps.contains(pkgName)}, rewardMinutes=${RewardManager.currentRewardMinutes}")
+            Log.d("AppBlocker", "🚫 BLOCKING app: $pkgName")
             
             // Show toast with package name
             Handler(Looper.getMainLooper()).post {
@@ -113,11 +120,8 @@ class AppBlockerService : AccessibilityService() {
 
             // Use device owner capabilities if available for stronger blocking
             if (devicePolicyManager.isDeviceOwnerActive()) {
-                Log.d("AppBlocker", "Using device owner to disable app: $pkgName")
                 devicePolicyManager.disableApp(pkgName)
             }
-
-            // Don't automatically add to blacklist - only add when user explicitly blacklists
 
             returnToLauncher()
             return
@@ -139,9 +143,6 @@ class AppBlockerService : AccessibilityService() {
         // Initialize Device Policy Manager
         devicePolicyManager = com.talq2me.baerenlock.DevicePolicyManager.getInstance(this)
 
-        // Load blocked packages from settings
-        loadBlockedPackages()
-
         backgroundHandler.post(periodicCheck)
         // Start UsageStats polling
         if (!hasUsageStatsPermission()) {
@@ -154,15 +155,10 @@ class AppBlockerService : AccessibilityService() {
 
         // Start background app cleanup
         backgroundHandler.post(backgroundCleanupCheck)
-
-        // Ensure RewardManager's timer is started if there are reward minutes
-        // Removed as timer management is now centralized in LauncherActivity.onResume()
-        // if (RewardManager.currentRewardMinutes > 0) {
-        //     Log.d("AppBlocker", "onServiceConnected: Reward minutes present (${RewardManager.currentRewardMinutes} min). Starting RewardManager timer.")
-        //     RewardManager.startRewardTimer(this)
-        // } else {
-        //     Log.d("AppBlocker", "onServiceConnected: No reward minutes present. Not starting RewardManager timer.")
-        // }
+        
+        // Start health check monitoring
+        lastEventTime = System.currentTimeMillis()
+        backgroundHandler.postDelayed(healthCheckRunnable, 60000) // Start after 1 minute
     }
 
     override fun onDestroy() {
@@ -170,14 +166,48 @@ class AppBlockerService : AccessibilityService() {
         backgroundHandler.removeCallbacks(periodicCheck)
         backgroundHandler.removeCallbacks(usageCheck)
         backgroundHandler.removeCallbacks(backgroundCleanupCheck)
+        backgroundHandler.removeCallbacks(healthCheckRunnable)
         backgroundThread.quitSafely()
         stopForeground(true)
+    }
+    
+    /**
+     * Checks if the service is actually receiving events.
+     * If no events have been received in the last 2 minutes, the service may not be working properly.
+     */
+    private fun checkServiceHealth() {
+        try {
+            val timeSinceLastEvent = System.currentTimeMillis() - lastEventTime
+            // If no events received in 2 minutes, log a warning
+            // This could indicate the service is enabled but not receiving events
+            if (timeSinceLastEvent > 120000) { // 2 minutes
+                Log.w("AppBlocker", "Service health check: No accessibility events received in ${timeSinceLastEvent / 1000}s")
+                // Store health status for reporting
+                storeServiceHealthStatus(false)
+            } else {
+                // Service is healthy - receiving events
+                storeServiceHealthStatus(true)
+            }
+        } catch (e: Exception) {
+            Log.e("AppBlocker", "Error in service health check", e)
+        }
+    }
+    
+    private fun storeServiceHealthStatus(isHealthy: Boolean) {
+        try {
+            val prefs = getSharedPreferences("health_prefs", MODE_PRIVATE)
+            prefs.edit().apply {
+                putBoolean("service_receiving_events", isHealthy)
+                putLong("last_service_health_check", System.currentTimeMillis())
+                apply()
+            }
+        } catch (e: Exception) {
+            Log.e("AppBlocker", "Error storing service health status", e)
+        }
     }
 
     private fun checkForegroundApp() {
         try {
-            //Log.d("AppBlocker", "Periodic check running...")
-            
             val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
             val processes = am.runningAppProcesses
             
@@ -185,15 +215,13 @@ class AppBlockerService : AccessibilityService() {
                 for (process in processes) {
                     if (process.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
                         val pkgName = process.processName
-                        Log.d("AppBlocker", "Foreground process: $pkgName")
 
                         // Update RewardManager with the current foreground app (for accurate reward time counting)
                         RewardManager.updateForegroundApp(pkgName)
 
                         // Check if this app should be blocked
                         if (shouldBlockApp(pkgName)) {
-                            Log.d("AppBlocker", "🚫 PERIODIC CHECK - BLOCKING app: $pkgName - returning to launcher")
-                            Log.d("AppBlocker", "Blocking reason: blacklist=${getBlacklist().contains(pkgName)}, rewardApp=${RewardManager.rewardEligibleApps.contains(pkgName)}, rewardMinutes=${RewardManager.currentRewardMinutes}")
+                            Log.d("AppBlocker", "🚫 BLOCKING app: $pkgName")
                             
                             // Show toast with package name
                             Handler(Looper.getMainLooper()).post {
@@ -202,11 +230,9 @@ class AppBlockerService : AccessibilityService() {
 
                             // Use device owner capabilities if available for stronger blocking
                             if (devicePolicyManager.isDeviceOwnerActive()) {
-                                Log.d("AppBlocker", "Using device owner to disable app: $pkgName")
                                 devicePolicyManager.disableApp(pkgName)
                             }
 
-                            // Don't automatically add to blacklist - only add when user explicitly blacklists
                             returnToLauncher()
                             return
                         }
@@ -214,8 +240,6 @@ class AppBlockerService : AccessibilityService() {
                         return
                     }
                 }
-            } else {
-                Log.d("AppBlocker", "No running processes found")
             }
             
         } catch (e: Exception) {
@@ -279,28 +303,20 @@ class AppBlockerService : AccessibilityService() {
     private fun shouldBlockApp(pkgName: String): Boolean {
         // Never block our own app
         if (pkgName == packageName) {
-            Log.d("AppBlocker", "Not blocking our own app: $pkgName")
             return false
         }
 
-        // Get the blacklist
-        val blacklist = getBlacklist()
-        Log.d("AppBlocker", "Checking if should block: $pkgName")
-        Log.d("AppBlocker", "Blacklist size: ${blacklist.size}, contains $pkgName: ${blacklist.contains(pkgName)}")
-        if (blacklist.isNotEmpty()) {
-            Log.d("AppBlocker", "Blacklist contents: ${blacklist.joinToString(", ")}")
-        }
+        // Get the blacklist using BlacklistManager
+        val blacklist = BlacklistManager.getBlacklist(this)
 
         // Check if app is in blacklist
         if (blacklist.contains(pkgName)) {
             // Special case: Chrome - allow if viewing JeLis or launched from BaerenEd
             if (pkgName == "com.android.chrome" || pkgName == "com.chrome.browser" || pkgName.contains("chrome", ignoreCase = true)) {
                 if (chromeJeLisUrl != null || chromeLaunchedFromBaerenEd) {
-                    Log.d("AppBlocker", "Chrome in blacklist but viewing JeLis - allowing: $pkgName")
                     return false
                 }
             }
-            Log.d("AppBlocker", "App in blacklist, blocking: $pkgName")
             return true
         }
 
@@ -308,53 +324,26 @@ class AppBlockerService : AccessibilityService() {
         val isRewardApp = RewardManager.rewardEligibleApps.contains(pkgName)
         val hasRewardMinutes = RewardManager.currentRewardMinutes > 0
         if (isRewardApp && !hasRewardMinutes) {
-            Log.d("AppBlocker", "Reward app with 0 minutes, blocking: $pkgName")
             return true
         }
 
         // Everything else is allowed (not blocked)
-        Log.d("AppBlocker", "App not blocked (not in blacklist, not expired reward app): $pkgName")
         return false
     }
 
-    private fun addToBlacklist(pkgName: String) {
-        try {
-            val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
-            val blacklist = prefs.getStringSet("packages", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-            if (blacklist.add(pkgName)) {
-                prefs.edit().putStringSet("packages", blacklist).apply()
-                Log.d("AppBlocker", "Added $pkgName to blacklist")
-            }
-        } catch (e: Exception) {
-            Log.e("AppBlocker", "Error adding to blacklist", e)
-        }
-    }
-
+    // Blacklist operations are now handled by BlacklistManager
+    // These methods are kept for backward compatibility but delegate to BlacklistManager
+    @Deprecated("Use BlacklistManager.getBlacklist() instead", ReplaceWith("BlacklistManager.getBlacklist(context)"))
     fun getBlacklist(): Set<String> {
-        return try {
-            val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
-            prefs.getStringSet("packages", emptySet()) ?: emptySet()
-        } catch (e: Exception) {
-            Log.e("AppBlocker", "Error getting blacklist", e)
-            emptySet()
-        }
+        return BlacklistManager.getBlacklist(this)
     }
 
+    @Deprecated("Use BlacklistManager.removeFromBlacklist() instead", ReplaceWith("BlacklistManager.removeFromBlacklist(context, pkgName)"))
     fun removeFromBlacklist(pkgName: String) {
-        try {
-            val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
-            val blacklist = prefs.getStringSet("packages", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-            if (blacklist.remove(pkgName)) {
-                prefs.edit().putStringSet("packages", blacklist).apply()
-                Log.d("AppBlocker", "Removed $pkgName from blacklist")
-            }
-        } catch (e: Exception) {
-            Log.e("AppBlocker", "Error removing from blacklist", e)
-        }
+        BlacklistManager.removeFromBlacklist(this, pkgName)
     }
 
     private fun returnToLauncher() {
-        Log.d("AppBlocker", "Returning to launcher...")
         try {
             // First, try to go home using the HOME intent (most reliable)
             val homeIntent = Intent(Intent.ACTION_MAIN).apply {
@@ -418,25 +407,18 @@ class AppBlockerService : AccessibilityService() {
             var lastForeground: String? = null
             while (events.hasNextEvent()) {
                 events.getNextEvent(event)
-                Log.d("AppBlocker", "USAGESTATS: Raw Event - Type: ${event.eventType}, Package: ${event.packageName}, Class: ${event.className}, Timestamp: ${event.timeStamp}")
                 if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
                     lastForeground = event.packageName
-                    Log.d("AppBlocker", "USAGESTATS: ACTIVITY_RESUMED: $lastForeground")
                 }
             }
-            val pkgName = lastForeground ?: run {
-                Log.d("AppBlocker", "USAGESTATS: No foreground app detected (check recent 15min)")
-                return
-            }
-            Log.d("AppBlocker", "USAGESTATS: Last foreground app: $pkgName")
+            val pkgName = lastForeground ?: return
             
             // Update RewardManager with the current foreground app (for accurate reward time counting)
             RewardManager.updateForegroundApp(pkgName)
             
             // Check if this app should be blocked
             if (shouldBlockApp(pkgName)) {
-                Log.d("AppBlocker", "USAGESTATS - BLOCKING app: $pkgName - returning to launcher")
-                Log.d("AppBlocker", "Blocking reason: blacklist=${getBlacklist().contains(pkgName)}, rewardApp=${RewardManager.rewardEligibleApps.contains(pkgName)}, rewardMinutes=${RewardManager.currentRewardMinutes}")
+                Log.d("AppBlocker", "🚫 BLOCKING app: $pkgName")
                 
                 // Show toast with package name
                 Handler(Looper.getMainLooper()).post {
@@ -445,95 +427,26 @@ class AppBlockerService : AccessibilityService() {
 
                 // Use device owner capabilities if available for stronger blocking
                 if (devicePolicyManager.isDeviceOwnerActive()) {
-                    Log.d("AppBlocker", "Using device owner to disable app: $pkgName")
                     devicePolicyManager.disableApp(pkgName)
                 }
 
-                // Don't automatically add to blacklist - only add when user explicitly blacklists
                 returnToLauncher()
                 return
             }
-            // App is allowed, do nothing
-            return
         } catch (e: Exception) {
-            Log.e("AppBlocker", "USAGESTATS: Error in checkUsageStats", e)
+            Log.e("AppBlocker", "Error in checkUsageStats", e)
         }
     }
 
     private fun cleanupUnauthorizedBackgroundApps() {
         try {
-            Log.d("AppBlocker", "Running background app cleanup...")
-
             // Use RewardManager to kill unauthorized background apps
-            com.talq2me.baerenlock.RewardManager.killUnauthorizedBackgroundApps(this)
-
-            // Also check for any blocked packages that might be running
-            if (blockedPackages.isNotEmpty()) {
-                val activityManager = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
-                for (blockedPackage in blockedPackages) {
-                    try {
-                        Log.d("AppBlocker", "Force killing blocked package: $blockedPackage")
-                        activityManager.killBackgroundProcesses(blockedPackage)
-                    } catch (e: Exception) {
-                        Log.w("AppBlocker", "Failed to kill blocked package $blockedPackage: ${e.message}")
-                    }
-                }
-            }
-
+            RewardManager.killUnauthorizedBackgroundApps(this)
         } catch (e: Exception) {
             Log.e("AppBlocker", "Error during background app cleanup", e)
         }
     }
 
-    private fun loadBlockedPackages() {
-        try {
-            val prefs = getSharedPreferences("blocked_apps", MODE_PRIVATE)
-            val blockedSet = prefs.getStringSet("packages", emptySet())
-            blockedPackages.clear()
-            blockedPackages.addAll(blockedSet ?: emptySet())
-            Log.d("AppBlocker", "Loaded ${blockedPackages.size} blocked packages: $blockedPackages")
-        } catch (e: Exception) {
-            Log.e("AppBlocker", "Error loading blocked packages", e)
-        }
-    }
-
-    fun addBlockedPackage(packageName: String) {
-        try {
-            blockedPackages.add(packageName)
-            val prefs = getSharedPreferences("blocked_apps", MODE_PRIVATE)
-            prefs.edit().putStringSet("packages", blockedPackages).apply()
-
-            // Use device owner to disable if available
-            if (devicePolicyManager.isDeviceOwnerActive()) {
-                devicePolicyManager.disableApp(packageName)
-            }
-
-            Log.d("AppBlocker", "Added blocked package: $packageName")
-        } catch (e: Exception) {
-            Log.e("AppBlocker", "Error adding blocked package", e)
-        }
-    }
-
-    fun removeBlockedPackage(packageName: String) {
-        try {
-            blockedPackages.remove(packageName)
-            val prefs = getSharedPreferences("blocked_apps", MODE_PRIVATE)
-            prefs.edit().putStringSet("packages", blockedPackages).apply()
-
-            // Use device owner to enable if available
-            if (devicePolicyManager.isDeviceOwnerActive()) {
-                devicePolicyManager.enableApp(packageName)
-            }
-
-            Log.d("AppBlocker", "Removed blocked package: $packageName")
-        } catch (e: Exception) {
-            Log.e("AppBlocker", "Error removing blocked package", e)
-        }
-    }
-
-    fun getBlockedPackages(): Set<String> {
-        return blockedPackages.toSet()
-    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -556,25 +469,6 @@ class AppBlockerService : AccessibilityService() {
             .setSmallIcon(R.mipmap.ic_launcher) // Use your app's launcher icon
             .setOngoing(true)
             .build()
-    }
-
-    fun clearAllBlockedPackages() {
-        try {
-            // Re-enable all blocked apps first
-            if (devicePolicyManager.isDeviceOwnerActive()) {
-                blockedPackages.forEach { packageName ->
-                    devicePolicyManager.enableApp(packageName)
-                }
-            }
-
-            blockedPackages.clear()
-            val prefs = getSharedPreferences("blocked_apps", MODE_PRIVATE)
-            prefs.edit().clear().apply()
-
-            Log.d("AppBlocker", "Cleared all blocked packages")
-        } catch (e: Exception) {
-            Log.e("AppBlocker", "Error clearing blocked packages", e)
-        }
     }
 
 }

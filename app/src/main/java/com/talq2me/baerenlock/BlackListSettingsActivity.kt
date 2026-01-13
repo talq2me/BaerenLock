@@ -60,8 +60,8 @@ class BlackListSettingsActivity : AppCompatActivity() {
 
         Log.d(TAG, "Apps to show: ${allApps.size}")
         
-        // Get current blacklist
-        val blacklist = getBlacklistFromService().toMutableSet()
+        // Get current blacklist using BlacklistManager
+        val blacklist = BlacklistManager.getBlacklist(this).toMutableSet()
         
         // Count apps that are currently blacklisted
         val blacklistedCount = allApps.count { app ->
@@ -125,7 +125,7 @@ class BlackListSettingsActivity : AppCompatActivity() {
                     }
                     // Update the header count
                     val newCount = allApps.count { app -> 
-                        getBlacklistFromService().contains(app.packageName) 
+                        BlacklistManager.getBlacklist(this@BlackListSettingsActivity).contains(app.packageName) 
                     }
                     header.text = "Found ${allApps.size} apps. Currently blacklisted: $newCount"
                 }
@@ -140,36 +140,20 @@ class BlackListSettingsActivity : AppCompatActivity() {
         setContentView(scroll)
     }
 
-    private fun getBlacklistFromService(): Set<String> {
-        // Read directly from SharedPreferences (same storage AppBlockerService uses)
-        val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
-        return prefs.getStringSet("packages", emptySet()) ?: emptySet()
-    }
-
     private fun addToBlacklist(pkgName: String) {
-        val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
-        val blacklist = prefs.getStringSet("packages", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-        blacklist.add(pkgName)
-        prefs.edit().putStringSet("packages", blacklist).apply()
-        Log.d(TAG, "Added $pkgName to blacklist")
+        BlacklistManager.addToBlacklist(this, pkgName)
         // Sync to cloud
         SettingsManager.syncAppListsToCloudAsync(this)
     }
 
     private fun removeFromBlacklist(pkgName: String) {
-        val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
-        val blacklist = prefs.getStringSet("packages", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
-        blacklist.remove(pkgName)
-        prefs.edit().putStringSet("packages", blacklist).apply()
-        Log.d(TAG, "Removed $pkgName from blacklist")
+        BlacklistManager.removeFromBlacklist(this, pkgName)
         // Sync to cloud
         SettingsManager.syncAppListsToCloudAsync(this)
     }
     
     private fun clearAllBlacklist() {
-        val prefs = getSharedPreferences("blacklist_prefs", MODE_PRIVATE)
-        prefs.edit().remove("packages").apply()
-        Log.d(TAG, "Cleared all blacklist entries")
+        BlacklistManager.clearAll(this)
         // Sync to cloud
         SettingsManager.syncAppListsToCloudAsync(this)
     }

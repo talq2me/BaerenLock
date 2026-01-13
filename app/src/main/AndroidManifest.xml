@@ -100,10 +100,6 @@
         </provider>
 
         <receiver
-            android:name=".InstallResultReceiver"
-            android:exported="false" />
-
-        <receiver
             android:name=".RewardTimeReceiver"
             android:exported="true">
             <intent-filter>

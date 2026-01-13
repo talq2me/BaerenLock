@@ -1,0 +1,12 @@
+- switch profiles to the other profile. new profile in devices.active_profile and in UI of baerenLock.
+- switch profiles from baerenEd. new profile in devices.active_profiles, and UI of baerenEd, and upon returning to baerenLock, profile has been updated to active_profile.
+- launching settings prompts for pin, entering pin 1234 shows settings menu.
+- ✅ **AUTOMATED** - change settings for email and changes are reflected in settings table of db. (Test: `SettingsDatabaseIntegrationTest`)
+- upon fresh install, accessibility services will not be set, devices table should show unhealthy state and note accessibility as the problem. turning on accessibility for BaerenLock and returning to baerenlock will set the state in the db to healthy and remove the problem.
+- grant 5 min reward time in baerenlock, 5 min pushed to db user_data table for active profile. also reflected in baerenEd. the reward apps are automatically unlocked and time starts counting down once a reward app is in foreground. check db is counting down every 1 min. after 5 mins, the reward app is blocked and user cannot go back to it successfully using recent apps, it is blocked every time.
+- repeat above granting the time in baerened and ensure after reward time is up, baerenEd does not report any reward time left. (possibly remove the use reward time button).
+
+- ✅ **AUTOMATED** - set a whitelist app and verify it shows in the launcher. verify it is saved to the database user_data table (Test: `WhitelistAppDatabaseIntegrationTest.testAddWhitelistAppSavedToDatabase`)
+- ✅ **AUTOMATED** - remove a whitelist app and verify it is removed from the launcher. verify it is saved to the user_data table (Test: `WhitelistAppDatabaseIntegrationTest.testRemoveWhitelistAppRemovedFromDatabase`)
+- ✅ **AUTOMATED** - set a blacklisted app and verify it is saved to the user_data table. try to launch this app and verify it is blocked. (Test: `BlacklistAppDatabaseIntegrationTest` - database verification automated, app blocking verification still manual)
+- ⚠️ **PARTIALLY AUTOMATED** - set a reward app and verify it is saved to the user_data table. grant 1 min time and verify the app shows up in the launcher, run the app in the foreground for 1 min until the time expires and verify it is now blocked and doesn't appear in the launcher. (Test: `RewardAppDatabaseIntegrationTest` - database verification automated, launcher/blocking verification still manual)

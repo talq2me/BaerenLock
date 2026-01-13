@@ -1,7 +1,5 @@
 package com.talq2me.baerenlock
 
-import android.content.pm.PackageInstaller
-import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -26,11 +24,7 @@ import android.widget.ScrollView
 import android.widget.EditText
 import android.widget.Button
 import android.view.View
-// download updates 
-import android.app.DownloadManager
-import android.os.Environment
 import androidx.appcompat.app.AlertDialog
-import androidx.core.content.FileProvider
 import com.talq2me.baerenlock.DevicePolicyManager as CustomDevicePolicyManager
 import java.io.File
 import org.json.JSONObject
@@ -60,153 +54,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         private const val GITHUB_OWNER = "talq2me"
         private const val GITHUB_REPO = "BaerenCloud"
         private const val GITHUB_REPORTS_PATH = "BaerenEd_Reports"  // Directory in repo for reports (same as BaerenEd)
-        
-        fun checkForUpdate(context: Context) {
-            checkForUpdate(context, false)
-        }
-        
-        fun checkForUpdate(context: Context, force: Boolean = false) {
-            // Throttle update checks to avoid excessive network requests
-            // Only check once per hour unless forced
-            val prefs = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
-            val lastCheckTime = prefs.getLong("last_update_check", 0L)
-            val now = System.currentTimeMillis()
-            val oneHourInMs = 60 * 60 * 1000L
-            
-            if (!force && (now - lastCheckTime) < oneHourInMs) {
-                Log.d("MainActivity", "Skipping update check - last checked ${(now - lastCheckTime) / 1000 / 60} minutes ago")
-                return
-            }
-            
-            // Save the check time
-            prefs.edit().putLong("last_update_check", now).apply()
-            
-            Thread {
-                try {
-                    // Check for internet first (wrap in try-catch in case permission is missing)
-                    var hasNetwork = false
-                    try {
-                        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-                        val network = cm.activeNetwork
-                        hasNetwork = network != null
-                    } catch (e: SecurityException) {
-                        Log.w("MainActivity", "Missing ACCESS_NETWORK_STATE permission, skipping network check: ${e.message}")
-                        // Continue anyway - try to download and see if it works
-                        hasNetwork = true // Assume network is available and try the download
-                    }
-                    
-                    if (!hasNetwork) {
-                        Log.d("MainActivity", "No internet — skipping update check.")
-                        return@Thread
-                    }
-
-                    Log.d("MainActivity", "Checking for updates...")
-                    // Download JSON from GitHub Pages
-                    val jsonText = URL("https://raw.githubusercontent.com/talq2me/BaerenLock/refs/heads/main/release-config/version.json")
-                        .readText()
-
-                    val json = JSONObject(jsonText)
-                    val latestVersion = json.getInt("latestVersionCode")
-                    val apkUrl = json.getString("apkUrl")
-
-                    val currentVersion = context.packageManager
-                        .getPackageInfo(context.packageName, 0).longVersionCode
-
-                    Log.d("MainActivity", "Update check: current=$currentVersion, latest=$latestVersion")
-
-                    if (latestVersion > currentVersion) {
-                        // Force the update
-                        if (context is MainActivity) {
-                            context.runOnUiThread {
-                                AlertDialog.Builder(context)
-                                    .setTitle("Update Required")
-                                    .setMessage("A new version is available and must be installed to continue.")
-                                    .setCancelable(false)
-                                    .setPositiveButton("Update") { _, _ ->
-                                        downloadAndInstall(context, apkUrl)
-                                    }
-                                    .show()
-                            }
-                        } else if (context is LauncherActivity) {
-                            context.runOnUiThread {
-                                AlertDialog.Builder(context)
-                                    .setTitle("Update Required")
-                                    .setMessage("A new version is available and must be installed to continue.")
-                                    .setCancelable(false)
-                                    .setPositiveButton("Update") { _, _ ->
-                                        // Download and install the update
-                                        downloadAndInstall(context, apkUrl)
-                                    }
-                                    .show()
-                            }
-                        } else {
-                            // Generic context - try to show dialog if it's an Activity
-                            if (context is android.app.Activity) {
-                                context.runOnUiThread {
-                                    AlertDialog.Builder(context)
-                                        .setTitle("Update Required")
-                                        .setMessage("A new version is available and must be installed to continue.")
-                                        .setCancelable(false)
-                                        .setPositiveButton("Update") { _, _ ->
-                                            downloadAndInstall(context, apkUrl)
-                                        }
-                                        .show()
-                                }
-                            }
-                        }
-                    } else {
-                        Log.d("MainActivity", "App is up to date")
-                    }
-                } catch (e: Exception) {
-                    Log.e("MainActivity", "Update check error: ${e.message}", e)
-                }
-            }.start()
-        }
-
-        fun downloadAndInstall(context: Context, apkUrl: String) {
-            val request = DownloadManager.Request(Uri.parse(apkUrl))
-            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "update.apk")
-            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            request.setMimeType("application/vnd.android.package-archive")
-
-            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            val downloadId = dm.enqueue(request)
-            
-            // If called from MainActivity, store the ID for the receiver
-            if (context is MainActivity) {
-                (context as MainActivity).updateDownloadId = downloadId
-            } else {
-                // Store in SharedPreferences so MainActivity can pick it up if it's running
-                val prefs = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
-                prefs.edit().putLong("update_download_id", downloadId).apply()
-            }
-
-            // System installer will take over automatically when user taps the notification
-            Log.d("MainActivity", "Update download started: ID=$downloadId")
-        }
     }
 
     private lateinit var webView: WebView
     private lateinit var tts: TextToSpeech
     private var rewardAppDialog: AlertDialog? = null
-    private var updateDownloadId: Long = -1L
-    private val updateDownloadReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) ?: return
-            
-            // Check if this matches our tracked download ID or one from SharedPreferences
-            val prefs = getSharedPreferences("update_prefs", MODE_PRIVATE)
-            val savedDownloadId = prefs.getLong("update_download_id", -1L)
-            
-            if ((id == updateDownloadId && updateDownloadId != -1L) || 
-                (id == savedDownloadId && savedDownloadId != -1L)) {
-                // Clear the saved ID
-                prefs.edit().remove("update_download_id").apply()
-                updateDownloadId = id
-                handleDownloadedUpdate()
-            }
-        }
-    }
 
     private lateinit var requestOverlayPermissionLauncher: ActivityResultLauncher<Intent>
 
@@ -214,10 +66,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         super.onCreate(savedInstanceState)
         // Preload settings from Supabase on startup
         SettingsManager.preloadSettings(this)
-
-        checkForUpdate(this)
-
-        registerUpdateReceiver()
 
         requestOverlayPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
@@ -362,90 +210,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val filter = IntentFilter("com.talq2me.baerenlock.ACTION_GENERATE_REWARD_REPORT")
         LocalBroadcastManager.getInstance(this).registerReceiver(rewardReportReceiver, filter)
         Log.d(TAG, "Registered reward report receiver with LocalBroadcastManager")
-    }
-
-    private fun registerUpdateReceiver() {
-        val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(updateDownloadReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(updateDownloadReceiver, filter)
-        }
-    }
-
-    private fun handleDownloadedUpdate() {
-        updateDownloadId = -1L
-        val apkFile = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "update.apk")
-        if (!apkFile.exists()) {
-            Toast.makeText(this, "Update download missing.", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        val devicePolicyManager = CustomDevicePolicyManager.getInstance(this)
-        if (devicePolicyManager.isDeviceOwnerActive()) {
-            installSilently(apkFile)
-        } else {
-            promptManualInstall(apkFile)
-        }
-    }
-
-    private fun installSilently(apkFile: File) {
-        try {
-            val packageInstaller = packageManager.packageInstaller
-            val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
-            val sessionId = packageInstaller.createSession(params)
-            packageInstaller.openSession(sessionId).use { session ->
-                apkFile.inputStream().use { input ->
-                    session.openWrite("base.apk", 0, apkFile.length()).use { out ->
-                        input.copyTo(out)
-                        session.fsync(out)
-                    }
-                }
-                val statusIntent = Intent(this, InstallResultReceiver::class.java)
-                val pendingIntent = PendingIntent.getBroadcast(
-                    this,
-                    sessionId,
-                    statusIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-                session.commit(pendingIntent.intentSender)
-            }
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Silent install failed", e)
-            promptManualInstall(apkFile)
-        }
-    }
-
-    private fun promptManualInstall(apkFile: File) {
-        runOnUiThread {
-            AlertDialog.Builder(this)
-                .setTitle("Install Update")
-                .setMessage("A new version is ready to install.")
-                .setCancelable(false)
-                .setPositiveButton("Install") { _, _ ->
-                    launchManualInstallIntent(apkFile)
-                }
-                .show()
-        }
-    }
-
-    private fun launchManualInstallIntent(apkFile: File) {
-        if (!packageManager.canRequestPackageInstalls()) {
-            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(intent)
-            Toast.makeText(this, "Allow installs then tap Install again.", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        val apkUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apkFile)
-        val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
-            data = apkUri
-            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
-            putExtra(Intent.EXTRA_RETURN_RESULT, true)
-        }
-        startActivity(installIntent)
     }
 
     private fun initWebView() {
@@ -593,16 +357,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onResume() {
         super.onResume()
-        // Check for updates when coming to foreground (throttled to once per hour)
-        checkForUpdate(this)
     }
 
     override fun onDestroy() {
-        try {
-            unregisterReceiver(updateDownloadReceiver)
-        } catch (e: IllegalArgumentException) {
-            Log.w("MainActivity", "Receiver already unregistered")
-        }
         try {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(rewardReportReceiver)
         } catch (e: IllegalArgumentException) {
@@ -897,9 +654,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val childName = SettingsManager.readChildName(this) ?: "Child"
         Log.d(TAG, "Child name: $childName")
         
-        // Get profile (A or B) to determine filename
+        // Get profile (AM or BM) to determine filename
         val profile = readProfile()
-        val profilePrefix = if (profile == "A") "AM" else "BM"
+        val profilePrefix = profile // Profile is already in AM/BM format
         Log.d(TAG, "Profile: $profile, prefix: $profilePrefix")
         
         // Generate report section (for appending)
@@ -912,10 +669,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
     
     /**
-     * Reads the current profile (A or B) from Supabase
+     * Reads the current profile (AM or BM)
      */
     private fun readProfile(): String {
-        return SettingsManager.readProfile(this) ?: "A"
+        return SettingsManager.readProfile(this) ?: "AM"
     }
     
     /**

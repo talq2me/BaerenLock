@@ -1,80 +1,77 @@
 package com.talq2me.baerenlock
 
 import android.content.Context
-import android.content.SharedPreferences
 import org.junit.Before
 import org.junit.Test
 import org.junit.Assert.*
-import org.mockito.Mock
-import org.mockito.Mockito.*
-import org.mockito.MockitoAnnotations
-import org.mockito.kotlin.any
-import org.mockito.kotlin.whenever
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 
+@RunWith(RobolectricTestRunner::class)
 class AppBlockerServiceTest {
 
-    @Mock
-    private lateinit var mockContext: Context
-
-    @Mock
-    private lateinit var mockSharedPreferences: SharedPreferences
-
-    @Mock
-    private lateinit var mockEditor: SharedPreferences.Editor
+    private lateinit var context: Context
 
     @Before
     fun setUp() {
-        MockitoAnnotations.openMocks(this)
-        whenever(mockContext.getSharedPreferences(any(), any())).thenReturn(mockSharedPreferences)
-        whenever(mockSharedPreferences.edit()).thenReturn(mockEditor)
-        whenever(mockEditor.putStringSet(any(), any())).thenReturn(mockEditor)
-        whenever(mockEditor.apply()).then { }
-        whenever(mockContext.packageName).thenReturn("com.talq2me.baerenlock")
+        // Use Robolectric to get a real Android context
+        context = RuntimeEnvironment.getApplication()
+        
+        // Reset RewardManager state
+        RewardManager.currentRewardMinutes = 0
+        
+        // Clear SharedPreferences to ensure clean state
+        context.getSharedPreferences("whitelist_prefs", Context.MODE_PRIVATE).edit().clear().apply()
+        context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE).edit().clear().apply()
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().clear().apply()
+        
+        // Reset RewardAppsManager state by clearing stored data
+        RewardManager.loadAllowedApps(context)
+        RewardManager.loadRewardMinutes(context)
     }
 
     @Test
     fun `getBlacklist returns empty set by default`() {
-        whenever(mockSharedPreferences.getStringSet("packages", emptySet())).thenReturn(emptySet())
-
-        // Since getBlacklist is a method on AppBlockerService, we need to test it
-        // In a real scenario, you'd create a testable version or use reflection
-        // For now, we'll test the logic conceptually
-        
-        val blacklist = emptySet<String>()
+        // Use BlacklistManager which handles the actual logic
+        val blacklist = BlacklistManager.getBlacklist(context)
         assertTrue("Blacklist should be empty by default", blacklist.isEmpty())
     }
 
     @Test
     fun `getBlacklist returns saved packages`() {
         val packages = setOf("com.app1", "com.app2")
-        whenever(mockSharedPreferences.getStringSet("packages", emptySet())).thenReturn(packages)
-
-        // Test the logic
-        val blacklist = mockSharedPreferences.getStringSet("packages", emptySet()) ?: emptySet()
+        // Add packages to blacklist
+        packages.forEach { BlacklistManager.addToBlacklist(context, it) }
+        
+        // Get blacklist
+        val blacklist = BlacklistManager.getBlacklist(context)
         assertEquals("Should return saved packages", packages, blacklist)
     }
 
     @Test
     fun `addToBlacklist saves package to preferences`() {
         val packageName = "com.blocked.app"
-        val existingSet = mutableSetOf<String>()
-        whenever(mockSharedPreferences.getStringSet("packages", emptySet())).thenReturn(existingSet)
-
-        // Simulate adding to blacklist
-        existingSet.add(packageName)
-        // Verify the logic works
-        assertTrue("Package should be added", existingSet.contains(packageName))
+        
+        // Add to blacklist using BlacklistManager
+        BlacklistManager.addToBlacklist(context, packageName)
+        
+        // Verify it's in the blacklist
+        val blacklist = BlacklistManager.getBlacklist(context)
+        assertTrue("Package should be added", blacklist.contains(packageName))
     }
 
     @Test
     fun `removeFromBlacklist removes package from preferences`() {
         val packageName = "com.blocked.app"
-        val existingSet = mutableSetOf("com.blocked.app", "com.other.app")
-        whenever(mockSharedPreferences.getStringSet("packages", emptySet())).thenReturn(existingSet)
-
-        // Simulate removing from blacklist
-        existingSet.remove(packageName)
-        assertFalse("Package should be removed", existingSet.contains(packageName))
+        
+        // Add then remove
+        BlacklistManager.addToBlacklist(context, packageName)
+        BlacklistManager.removeFromBlacklist(context, packageName)
+        
+        // Verify it's removed
+        val blacklist = BlacklistManager.getBlacklist(context)
+        assertFalse("Package should be removed", blacklist.contains(packageName))
     }
 
     @Test
@@ -105,7 +102,10 @@ class AppBlockerServiceTest {
     @Test
     fun `shouldBlockApp blocks reward app with zero minutes`() {
         val packageName = "com.reward.app"
-        RewardManager.rewardEligibleApps.add(packageName)
+        // Add to reward eligible apps via settings
+        val settingsPrefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        settingsPrefs.edit().putStringSet("reward_apps", setOf(packageName)).apply()
+        RewardManager.refreshRewardEligibleApps(context)
         RewardManager.currentRewardMinutes = 0
         
         val isRewardApp = RewardManager.rewardEligibleApps.contains(packageName)
@@ -117,7 +117,10 @@ class AppBlockerServiceTest {
     @Test
     fun `shouldBlockApp allows reward app with active minutes`() {
         val packageName = "com.reward.app"
-        RewardManager.rewardEligibleApps.add(packageName)
+        // Add to reward eligible apps via settings
+        val settingsPrefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        settingsPrefs.edit().putStringSet("reward_apps", setOf(packageName)).apply()
+        RewardManager.refreshRewardEligibleApps(context)
         RewardManager.currentRewardMinutes = 10
         
         val isRewardApp = RewardManager.rewardEligibleApps.contains(packageName)
