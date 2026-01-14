@@ -2,6 +2,8 @@ package com.talq2me.baerenlock
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
@@ -32,11 +34,37 @@ object CloudSyncManager {
     private val gson = Gson()
     private val client = OkHttpClient()
     
+    // Shared coroutine scope for all async operations - prevents memory leaks
+    private val syncScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
     // Track which profiles we've already triggered reset for in this session to prevent loops
     private val resetTriggeredProfiles = Collections.synchronizedSet(mutableSetOf<String>()) as MutableSet<String>
     
     // Track which profiles are currently being downloaded to prevent concurrent downloads
     private val downloadingProfiles = Collections.synchronizedSet(mutableSetOf<String>()) as MutableSet<String>
+    
+    // Track which devices are currently ensuring device record to prevent concurrent calls
+    private val ensuringDevices = Collections.synchronizedSet(mutableSetOf<String>()) as MutableSet<String>
+    
+    /**
+     * Checks if the device has network connectivity
+     * Returns true if connected to internet, false otherwise
+     */
+    private fun isNetworkAvailable(context: Context): Boolean {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return false
+        
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network = connectivityManager.activeNetwork ?: return false
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        } else {
+            @Suppress("DEPRECATION")
+            val networkInfo = connectivityManager.activeNetworkInfo
+            networkInfo?.isConnected == true
+        }
+    }
     
     /**
      * Gets Supabase URL from BuildConfig
@@ -432,8 +460,8 @@ object CloudSyncManager {
                     val cloudTimestamp = userData?.get("last_updated") as? String
                     
                     if (cloudTimestamp != null) {
-                        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-                        val localTimestamp = prefs.getString("banked_mins_timestamp", null)
+                        val rewardPrefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
+                        val localTimestamp = rewardPrefs.getString("banked_mins_timestamp", null)
                         
                         if (localTimestamp != null) {
                             val cloudIsNewer = compareTimestamps(cloudTimestamp, localTimestamp) > 0
@@ -477,6 +505,12 @@ object CloudSyncManager {
             if (patchResponse.isSuccessful) {
                 patchResponse.close()
                 Log.d(TAG, "Successfully synced reward minutes to cloud for profile: $profile, minutes: $rewardMinutes, timestamp: $lastUpdated")
+                
+                // Save the timestamp to reward_prefs so future syncs can compare correctly
+                val rewardPrefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
+                rewardPrefs.edit().putString("banked_mins_timestamp", lastUpdated).apply()
+                Log.d(TAG, "Saved local banked_mins timestamp after successful cloud sync: $lastUpdated")
+                
                 return@withContext true
             } else {
                 val errorBody = patchResponse.body?.string() ?: "Unknown error"
@@ -489,6 +523,146 @@ object CloudSyncManager {
             Log.e(TAG, "Error syncing reward minutes to cloud", e)
             return@withContext false
         }
+    }
+    
+    /**
+     * Checks if daily reset is needed for a profile by querying only last_reset from cloud
+     * This is a lightweight check that should be done BEFORE syncing any data
+     * Returns true if reset is needed, false otherwise
+     */
+    suspend fun checkIfResetNeeded(context: Context, cloudProfile: String): Boolean = withContext(Dispatchers.IO) {
+        if (!isConfigured(context)) {
+            Log.d(TAG, "Supabase not configured, skipping reset check")
+            return@withContext false
+        }
+        
+        if (!isNetworkAvailable(context)) {
+            Log.d(TAG, "No network connectivity, skipping reset check")
+            return@withContext false
+        }
+        
+        try {
+            // Lightweight query - only fetch last_reset
+            val url = "${getSupabaseUrl(context)}/rest/v1/user_data?profile=eq.$cloudProfile&select=last_reset"
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .addHeader("apikey", getSupabaseKey(context))
+                .addHeader("Authorization", "Bearer ${getSupabaseKey(context)}")
+                .build()
+            
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                val responseBody = response.body?.string() ?: "[]"
+                response.close()
+                
+                if (responseBody != "[]" && responseBody != "{}") {
+                    val dataList = gson.fromJson(responseBody, object : TypeToken<List<Map<String, Any>>>() {}.type) as? List<Map<String, Any>>
+                    val userData = dataList?.firstOrNull()
+                    val lastReset = userData?.get("last_reset") as? String
+                    
+                    if (lastReset == null) {
+                        Log.d(TAG, "No last_reset in cloud, reset needed for profile: $cloudProfile")
+                        return@withContext true
+                    }
+                    
+                    val today = Calendar.getInstance().apply {
+                        set(Calendar.HOUR_OF_DAY, 0)
+                        set(Calendar.MINUTE, 0)
+                        set(Calendar.SECOND, 0)
+                        set(Calendar.MILLISECOND, 0)
+                    }
+                    val todayMillis = today.timeInMillis
+                    
+                    try {
+                        val resetDate = parseCloudTimestamp(lastReset)
+                        val resetCalendar = Calendar.getInstance().apply {
+                            timeInMillis = resetDate.time
+                            set(Calendar.HOUR_OF_DAY, 0)
+                            set(Calendar.MINUTE, 0)
+                            set(Calendar.SECOND, 0)
+                            set(Calendar.MILLISECOND, 0)
+                        }
+                        
+                        val needsReset = resetCalendar.timeInMillis != todayMillis
+                        if (needsReset) {
+                            Log.d(TAG, "Reset needed: last_reset=$lastReset is from different day for profile: $cloudProfile")
+                        }
+                        return@withContext needsReset
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error parsing last_reset timestamp: ${e.message}")
+                        return@withContext false
+                    }
+                }
+            } else {
+                response.close()
+            }
+        } catch (e: java.net.UnknownHostException) {
+            Log.d(TAG, "No network connectivity (UnknownHostException), skipping reset check: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking if reset needed: ${e.message}", e)
+        }
+        false
+    }
+    
+    /**
+     * Triggers a cloud reset for a profile (without downloading data)
+     * This should be called after checkIfResetNeeded returns true
+     */
+    suspend fun triggerCloudReset(context: Context, cloudProfile: String): Boolean = withContext(Dispatchers.IO) {
+        if (!isConfigured(context)) {
+            Log.d(TAG, "Supabase not configured, skipping cloud reset")
+            return@withContext false
+        }
+        
+        if (!isNetworkAvailable(context)) {
+            Log.d(TAG, "No network connectivity, skipping cloud reset")
+            return@withContext false
+        }
+        
+        // Prevent duplicate reset triggers
+        if (resetTriggeredProfiles.contains(cloudProfile)) {
+            Log.d(TAG, "Reset already triggered for profile: $cloudProfile, skipping")
+            return@withContext true
+        }
+        
+        try {
+            resetTriggeredProfiles.add(cloudProfile)
+            
+            val resetUpdateMap = mapOf<String, Any?>(
+                "last_updated" to null // Let database set this via trigger
+            )
+            val resetJson = gson.toJson(resetUpdateMap)
+            val resetRequestBody = resetJson.toRequestBody("application/json".toMediaType())
+            val resetPatchRequest = Request.Builder()
+                .url("${getSupabaseUrl(context)}/rest/v1/user_data?profile=eq.$cloudProfile")
+                .patch(resetRequestBody)
+                .addHeader("apikey", getSupabaseKey(context))
+                .addHeader("Authorization", "Bearer ${getSupabaseKey(context)}")
+                .addHeader("Prefer", "return=minimal")
+                .build()
+            
+            val resetResponse = client.newCall(resetPatchRequest).execute()
+            if (resetResponse.isSuccessful) {
+                resetResponse.close()
+                Log.d(TAG, "Triggered cloud reset for profile: $cloudProfile (database trigger will reset daily progress)")
+                delay(1000) // Wait 1 second for database trigger to complete
+                return@withContext true
+            } else {
+                val errorBody = resetResponse.body?.string() ?: "Unknown error"
+                Log.e(TAG, "Failed to trigger cloud reset: ${resetResponse.code} - $errorBody")
+                resetResponse.close()
+                resetTriggeredProfiles.remove(cloudProfile)
+                return@withContext false
+            }
+        } catch (e: java.net.UnknownHostException) {
+            Log.d(TAG, "No network connectivity (UnknownHostException), skipping cloud reset: ${e.message}")
+            resetTriggeredProfiles.remove(cloudProfile)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error triggering cloud reset: ${e.message}", e)
+            resetTriggeredProfiles.remove(cloudProfile)
+        }
+        false
     }
     
     /**
@@ -529,6 +703,14 @@ object CloudSyncManager {
                     val userData = dataList?.firstOrNull()
                     
                     if (userData != null) {
+                        // Note: Reset check should be done BEFORE calling this function using checkIfResetNeeded()
+                        // This function just downloads and applies the data
+                        
+                        // If this is a retry after reset, the reset has already been triggered
+                        if (isRetry && !resetTriggeredProfiles.contains(cloudProfile)) {
+                            Log.w(TAG, "Retry called but reset not triggered, this shouldn't happen")
+                        }
+                        
                         val today = Calendar.getInstance().apply {
                             set(Calendar.HOUR_OF_DAY, 0)
                             set(Calendar.MINUTE, 0)
@@ -536,78 +718,6 @@ object CloudSyncManager {
                             set(Calendar.MILLISECOND, 0)
                         }
                         val todayMillis = today.timeInMillis
-                        
-                        // Only check for reset if this is not a retry (to prevent infinite loops)
-                        var needsCloudReset = false
-                        if (!isRetry) {
-                            val lastReset = userData["last_reset"] as? String
-                            if (lastReset != null) {
-                                try {
-                                    val resetDate = parseCloudTimestamp(lastReset)
-                                    val resetCalendar = Calendar.getInstance().apply {
-                                        timeInMillis = resetDate.time
-                                        set(Calendar.HOUR_OF_DAY, 0)
-                                        set(Calendar.MINUTE, 0)
-                                        set(Calendar.SECOND, 0)
-                                        set(Calendar.MILLISECOND, 0)
-                                    }
-                                    
-                                    if (resetCalendar.timeInMillis != todayMillis) {
-                                        Log.d(TAG, "Cloud last_reset is from different day, will trigger cloud reset for profile: $cloudProfile")
-                                        needsCloudReset = true
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "Error parsing last_reset timestamp: ${e.message}")
-                                }
-                            } else {
-                                Log.d(TAG, "No last_reset in cloud, will trigger reset to initialize for profile: $cloudProfile")
-                                needsCloudReset = true
-                            }
-                        }
-                        
-                        // Trigger cloud reset if needed
-                        if (needsCloudReset && !resetTriggeredProfiles.contains(cloudProfile)) {
-                            try {
-                                resetTriggeredProfiles.add(cloudProfile)
-                                
-                                val resetUpdateMap = mapOf<String, Any?>(
-                                    "last_updated" to null // Let database set this via trigger
-                                )
-                                val resetJson = gson.toJson(resetUpdateMap)
-                                val resetRequestBody = resetJson.toRequestBody("application/json".toMediaType())
-                                val resetPatchRequest = Request.Builder()
-                                    .url("${getSupabaseUrl(context)}/rest/v1/user_data?profile=eq.$cloudProfile")
-                                    .patch(resetRequestBody)
-                                    .addHeader("apikey", getSupabaseKey(context))
-                                    .addHeader("Authorization", "Bearer ${getSupabaseKey(context)}")
-                                    .addHeader("Prefer", "return=minimal")
-                                    .build()
-                                
-                                val resetResponse = client.newCall(resetPatchRequest).execute()
-                                if (resetResponse.isSuccessful) {
-                                    resetResponse.close()
-                                    Log.d(TAG, "Triggered cloud reset for profile: $cloudProfile (database trigger will reset daily progress)")
-                                    delay(1000) // Wait 1 second for database trigger to complete
-                                    downloadingProfiles.remove(cloudProfile)
-                                    val retryResult = downloadUserDataFromCloud(context, cloudProfile, isRetry = true)
-                                    if (retryResult) {
-                                        return@withContext true
-                                    } else {
-                                        Log.w(TAG, "Retry download after reset failed, using current values")
-                                    }
-                                } else {
-                                    val errorBody = resetResponse.body?.string() ?: "Unknown error"
-                                    Log.w(TAG, "Failed to trigger cloud reset: ${resetResponse.code} - $errorBody")
-                                    resetResponse.close()
-                                    resetTriggeredProfiles.remove(cloudProfile)
-                                }
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Error triggering cloud reset: ${e.message}")
-                                resetTriggeredProfiles.remove(cloudProfile)
-                            }
-                        } else if (needsCloudReset && resetTriggeredProfiles.contains(cloudProfile)) {
-                            Log.d(TAG, "Already triggered reset for profile: $cloudProfile in this session, skipping to prevent loop")
-                        }
                         
                         // TIMESTAMP-BASED SYNC: Compare local banked_mins timestamp vs cloud last_updated timestamp
                         val rewardPrefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
@@ -969,6 +1079,11 @@ object CloudSyncManager {
             return@withContext null
         }
         
+        if (!isNetworkAvailable(context)) {
+            Log.d(TAG, "No network connectivity, skipping active profile fetch")
+            return@withContext null
+        }
+        
         try {
             val deviceId = getDeviceId(context)
             val url = "${getSupabaseUrl(context)}/rest/v1/devices?device_id=eq.$deviceId&select=active_profile,last_updated"
@@ -999,8 +1114,13 @@ object CloudSyncManager {
                 Log.e(TAG, "Failed to get active profile: ${response.code} - $errorBody")
                 response.close()
             }
+        } catch (e: java.net.UnknownHostException) {
+            // Network connectivity issue - log at debug level since this is expected when offline
+            Log.d(TAG, "No network connectivity (UnknownHostException), skipping active profile fetch: ${e.message}")
         } catch (e: Exception) {
-            Log.e(TAG, "Error getting active profile from cloud", e)
+            // Other errors - log at error level
+            Log.e(TAG, "Error getting active profile from cloud: ${e.message}", e)
+            Log.e(TAG, "Exception type: ${e.javaClass.simpleName}, stack trace: ${e.stackTrace.joinToString("\n")}")
         }
         null
     }
@@ -1010,7 +1130,7 @@ object CloudSyncManager {
      * @param forceUpdate If true, bypasses timestamp check and always updates (for user-initiated changes)
      */
     fun syncActiveProfileToCloudAsync(context: Context, profile: String, forceUpdate: Boolean = false) {
-        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+        syncScope.launch {
             try {
                 syncActiveProfileToCloud(context, profile, forceUpdate)
             } catch (e: Exception) {
@@ -1031,8 +1151,22 @@ object CloudSyncManager {
             return@withContext false
         }
         
+        if (!isNetworkAvailable(context)) {
+            Log.d(TAG, "No network connectivity, skipping device record ensure")
+            return@withContext false
+        }
+        
+        val deviceId = getDeviceId(context)
+        
+        // Prevent concurrent calls for the same device
+        if (ensuringDevices.contains(deviceId)) {
+            Log.d(TAG, "Already ensuring device record for device: $deviceId, skipping duplicate request")
+            return@withContext false
+        }
+        
+        ensuringDevices.add(deviceId)
+        
         try {
-            val deviceId = getDeviceId(context)
             val deviceName = getDeviceName(context)
             val localProfile = ProfileManager.getCurrentProfile(context)
             val localTimestamp = ProfileManager.getLocalProfileTimestamp(context)
@@ -1067,12 +1201,14 @@ object CloudSyncManager {
                 
                 if (!shouldUpdate) {
                     Log.d(TAG, "Cloud profile is newer or equal, not updating device record")
+                    ensuringDevices.remove(deviceId)
                     return@withContext true
                 }
                 
                 // Also check if profiles differ - if they're the same, no need to update
                 if (cloudProfileData.profile == localProfile && cloudTimestamp != null && localTimestamp != null) {
                     Log.d(TAG, "Profiles match and timestamps exist, skipping update")
+                    ensuringDevices.remove(deviceId)
                     return@withContext true
                 }
             }
@@ -1108,6 +1244,7 @@ object CloudSyncManager {
                 // Check if we actually got a row back (meaning update succeeded)
                 if (patchResponseBody != "[]" && patchResponseBody != "{}") {
                     Log.d(TAG, "Successfully updated device record in cloud: deviceId=$deviceId, profile=$localProfile")
+                    ensuringDevices.remove(deviceId)
                     return@withContext true
                 } else {
                     // PATCH returned 200 but no rows were updated - record doesn't exist, need to insert
@@ -1132,12 +1269,14 @@ object CloudSyncManager {
                 if (insertResponse.isSuccessful && insertResponseBody != "[]" && insertResponseBody != "{}") {
                     insertResponse.close()
                     Log.d(TAG, "Successfully created device record in cloud: deviceId=$deviceId, deviceName=$deviceName, profile=$localProfile")
+                    ensuringDevices.remove(deviceId)
                     return@withContext true
                 } else if (insertResponse.code == 409) {
                     // 409 = duplicate key - record already exists (another concurrent request created it)
                     // This is fine - the record exists, which is what we want
                     insertResponse.close()
                     Log.d(TAG, "Device record already exists (created by concurrent request): deviceId=$deviceId")
+                    ensuringDevices.remove(deviceId)
                     return@withContext true
                 } else {
                     val insertErrorBody = insertResponseBody
@@ -1146,9 +1285,16 @@ object CloudSyncManager {
                     Log.e(TAG, "Request body: $json")
                     insertResponse.close()
                 }
+        } catch (e: java.net.UnknownHostException) {
+            // Network connectivity issue - log at debug level since this is expected when offline
+            Log.d(TAG, "No network connectivity (UnknownHostException), skipping device record ensure: ${e.message}")
         } catch (e: Exception) {
-            Log.e(TAG, "Error ensuring device record", e)
+            // Other errors - log at error level
+            Log.e(TAG, "Error ensuring device record: ${e.message}", e)
             e.printStackTrace()
+        } finally {
+            // Always remove from ensuring set, even if there was an error
+            ensuringDevices.remove(deviceId)
         }
         false
     }
@@ -1157,7 +1303,7 @@ object CloudSyncManager {
      * Async wrapper for ensureDeviceRecord
      */
     fun ensureDeviceRecordAsync(context: Context) {
-        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+        syncScope.launch {
             try {
                 ensureDeviceRecord(context)
             } catch (e: Exception) {
@@ -1255,8 +1401,7 @@ object CloudSyncManager {
      * Async wrapper for syncAppListsToCloud
      */
     fun syncAppListsToCloudAsync(context: Context) {
-        val settingsScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        settingsScope.launch {
+        syncScope.launch {
             try {
                 syncAppListsToCloud(context)
             } catch (e: Exception) {
@@ -1269,8 +1414,7 @@ object CloudSyncManager {
      * Async wrapper for syncRewardMinutesToCloud
      */
     fun syncRewardMinutesToCloudAsync(context: Context, rewardMinutes: Int) {
-        val settingsScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        settingsScope.launch {
+        syncScope.launch {
             try {
                 syncRewardMinutesToCloud(context, rewardMinutes)
             } catch (e: Exception) {
@@ -1284,8 +1428,7 @@ object CloudSyncManager {
      * Downloads user_data for the current profile
      */
     fun downloadUserDataFromCloudAsync(context: Context) {
-        val settingsScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        settingsScope.launch {
+        syncScope.launch {
             try {
                 val profile = ProfileManager.getCurrentProfile(context)
                 downloadUserDataFromCloud(context, profile, isRetry = false)
@@ -1299,13 +1442,21 @@ object CloudSyncManager {
      * Async wrapper for syncHealthCheckToCloud
      */
     fun syncHealthCheckToCloudAsync(context: Context, healthStatus: String, healthIssues: String?) {
-        val settingsScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        settingsScope.launch {
+        syncScope.launch {
             try {
                 syncHealthCheckToCloud(context, healthStatus, healthIssues)
             } catch (e: Exception) {
                 Log.w(TAG, "Could not sync health check to cloud: ${e.message}")
             }
         }
+    }
+    
+    /**
+     * Cancels all ongoing coroutines in the sync scope
+     * Should be called when the app is being destroyed to prevent memory leaks
+     */
+    fun cancelAllSyncOperations() {
+        syncScope.cancel()
+        Log.d(TAG, "Cancelled all sync operations")
     }
 }

@@ -60,27 +60,40 @@ class LauncherActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         Log.d(TAG, "onCreate() called - initializing app")
         
+        prefs = getSharedPreferences("com.talq2me.baerenlock.prefs", Context.MODE_PRIVATE)
+        
+        // CRITICAL: Check if reset is needed FIRST, before any syncing
+        // This ensures we don't sync stale data that's about to be reset
+        Log.d(TAG, "Checking if daily reset is needed before syncing")
+        SettingsManager.checkAndTriggerResetIfNeeded(this)
+        
         // Preload settings from Supabase on startup (this also ensures device record exists)
         SettingsManager.preloadSettings(this)
 
-        prefs = getSharedPreferences("com.talq2me.baerenlock.prefs", Context.MODE_PRIVATE)
-
-        // CRITICAL: Check cloud profile FIRST before ensureDeviceRecord, so we don't overwrite cloud with old local value
+        // CRITICAL: Check cloud profile before ensureDeviceRecord, so we don't overwrite cloud with old local value
         Log.d(TAG, "Checking profile from cloud before ensuring device record")
         val profileChanged = SettingsManager.checkAndApplyProfileFromCloud(this)
         if (profileChanged) {
             Log.d(TAG, "Profile changed during onCreate, will refresh UI after initialization")
         }
         
+        // Request overlay permission if not granted
+        maybeRequestOverlayPermission()
+        
         // Perform health check on startup to detect issues immediately
         Log.d(TAG, "Performing initial health check on startup")
         performHealthCheck()
         
-        // Also ensure device record exists explicitly (now that local profile is synced from cloud)
-        Log.d(TAG, "Ensuring device record exists in cloud")
-        CloudSyncManager.ensureDeviceRecordAsync(this)
+        // Note: Device record is already ensured by preloadSettings() above
+        // Health check also ensures device record, so no need for another call here
 
-        val userProfile = readProfile()
+        // Ensure we have a profile - if checkAndApplyProfileFromCloud failed, use default
+        var userProfile = readProfile()
+        if (userProfile == null) {
+            Log.w(TAG, "Profile is null after checkAndApplyProfileFromCloud, defaulting to AM")
+            userProfile = "AM"
+            writeProfile(userProfile)
+        }
 
         backgroundImageView = createDailyBackgroundImageView(userProfile)
 
@@ -233,6 +246,10 @@ class LauncherActivity : AppCompatActivity() {
         // Start periodic health checks (every 5 minutes)
         startPeriodicHealthChecks()
         
+        // CRITICAL: Check if reset is needed FIRST, before any syncing
+        Log.d(TAG, "Checking if daily reset is needed before syncing (onResume)")
+        SettingsManager.checkAndTriggerResetIfNeeded(this)
+        
         // CRITICAL: Check for profile changes from cloud BEFORE refreshing UI
         // This ensures the UI displays the correct profile after sync
         val profileChanged = SettingsManager.checkAndApplyProfileFromCloud(this)
@@ -244,6 +261,7 @@ class LauncherActivity : AppCompatActivity() {
         // Banner will be updated by performHealthCheck() which calls updateHealthBanner()
 
         // Download user_data from cloud for current profile (to get accurate reward minutes)
+        // This happens after reset check, so we download the reset data if reset was triggered
         SettingsManager.downloadUserDataFromCloud(this)
         
         // Update cloud toggle state
@@ -305,6 +323,18 @@ class LauncherActivity : AppCompatActivity() {
         }
     }
 
+    private fun maybeRequestOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!Settings.canDrawOverlays(this)) {
+                Log.d(TAG, "Overlay permission not granted, requesting permission")
+                val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            }
+        }
+    }
+    
     private fun ensureDefaultLauncher() {
         val devicePolicyManager = DevicePolicyManager.getInstance(this)
         if (devicePolicyManager.isDeviceOwnerActive()) {
@@ -529,25 +559,36 @@ class LauncherActivity : AppCompatActivity() {
     
     private fun performHealthCheck(): ServiceHealthMonitor.HealthCheckResult {
         // Always perform a fresh check - don't rely on cached data
-        var result = ServiceHealthMonitor.performHealthCheck(this)
+        val baseResult = ServiceHealthMonitor.performHealthCheck(this)
         
-        Log.d(TAG, "performHealthCheck: accessibility=${result.accessibilityStatus}, overlay=${result.overlayPermissionStatus}, battery=${result.batteryOptimizationStatus}")
+        Log.d(TAG, "performHealthCheck: accessibility=${baseResult.accessibilityStatus}, overlay=${baseResult.overlayPermissionStatus}, battery=${baseResult.batteryOptimizationStatus}")
         
         // Check if service is actually receiving events (more reliable than just checking if enabled)
         // This detects the case where accessibility is enabled but service isn't working after crash
+        // However, don't mark accessibility as unhealthy on fresh installs (when there's no health check data yet)
+        var result = baseResult
         val serviceReceivingEvents = checkIfServiceReceivingEvents()
-        if (result.accessibilityStatus == ServiceHealthMonitor.HealthStatus.HEALTHY && !serviceReceivingEvents) {
-            // Service is enabled in settings but not receiving events - this is the problem case
-            Log.w(TAG, "Accessibility service is enabled but not receiving events")
-            result = ServiceHealthMonitor.HealthCheckResult(
-                accessibilityStatus = ServiceHealthMonitor.HealthStatus.DISABLED,
-                usageStatsStatus = result.usageStatsStatus,
-                defaultLauncherStatus = result.defaultLauncherStatus,
-                overlayPermissionStatus = result.overlayPermissionStatus,
-                batteryOptimizationStatus = result.batteryOptimizationStatus,
-                accessibilityServiceName = result.accessibilityServiceName,
-                lastCheckTime = result.lastCheckTime
-            )
+        if (baseResult.accessibilityStatus == ServiceHealthMonitor.HealthStatus.HEALTHY && !serviceReceivingEvents) {
+            // Only mark as unhealthy if we have health check data (not a fresh install)
+            // This prevents false positives on fresh installs
+            val prefs = getSharedPreferences("health_prefs", Context.MODE_PRIVATE)
+            val lastServiceHealthCheck = prefs.getLong("last_service_health_check", 0)
+            if (lastServiceHealthCheck > 0) {
+                // We have health check data, so this is a real issue
+                Log.w(TAG, "Accessibility service is enabled but not receiving events")
+                result = ServiceHealthMonitor.HealthCheckResult(
+                    accessibilityStatus = ServiceHealthMonitor.HealthStatus.DISABLED,
+                    usageStatsStatus = baseResult.usageStatsStatus,
+                    defaultLauncherStatus = baseResult.defaultLauncherStatus,
+                    overlayPermissionStatus = baseResult.overlayPermissionStatus,
+                    batteryOptimizationStatus = baseResult.batteryOptimizationStatus,
+                    accessibilityServiceName = baseResult.accessibilityServiceName,
+                    lastCheckTime = baseResult.lastCheckTime
+                )
+            } else {
+                // Fresh install - don't mark accessibility as unhealthy based on event receipt
+                Log.d(TAG, "Fresh install detected - not marking accessibility as unhealthy based on event receipt")
+            }
         }
         
         // Store health check result for reporting
@@ -561,8 +602,9 @@ class LauncherActivity : AppCompatActivity() {
         // Also ensure device record exists (in case it wasn't created during startup)
         CloudSyncManager.ensureDeviceRecordAsync(this)
         
-        // Update health banner with the result
-        updateHealthBanner(result)
+        // Update health banner with the BASE result (before the accessibility event check modification)
+        // This ensures the banner shows the actual permission status, not a modified status
+        updateHealthBanner(baseResult)
         
         return result
     }
@@ -852,6 +894,9 @@ class LauncherActivity : AppCompatActivity() {
                     // Update the display
                     updateRewardMinutesDisplay()
                     
+                    // Refresh icons to show reward apps
+                    refreshIcons(appGrid)
+                    
                     Toast.makeText(this, "Added $minutes reward minutes. Total: ${RewardManager.currentRewardMinutes} minutes", Toast.LENGTH_SHORT).show()
                     Log.d(TAG, "Manually added $minutes reward minutes. Total: ${RewardManager.currentRewardMinutes} minutes")
                     
@@ -1014,20 +1059,21 @@ class LauncherActivity : AppCompatActivity() {
             return
         }
         
-        // Determine which issue to show (prioritize accessibility, then overlay, then battery, then others)
+        // Determine which issue to show (prioritize overlay, then accessibility, then battery, then others)
+        // Overlay permission is checked first because it's a simpler permission and less likely to have false positives
         val issue: String
         val intent: Intent
         
         when {
-            healthResult.accessibilityStatus != ServiceHealthMonitor.HealthStatus.HEALTHY -> {
-                issue = "Enable Protection (Accessibility Service)"
-                intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-            }
             healthResult.overlayPermissionStatus != ServiceHealthMonitor.HealthStatus.HEALTHY -> {
                 issue = "Enable Display Over Other Apps"
                 intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
                     data = Uri.parse("package:$packageName")
                 }
+            }
+            healthResult.accessibilityStatus != ServiceHealthMonitor.HealthStatus.HEALTHY -> {
+                issue = "Enable Protection (Accessibility Service)"
+                intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
             }
             healthResult.batteryOptimizationStatus != ServiceHealthMonitor.HealthStatus.HEALTHY -> {
                 issue = "Disable Battery Optimization"

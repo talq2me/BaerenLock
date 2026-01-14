@@ -518,31 +518,23 @@ object RewardManager {
                     val oneMinuteInMillis = 60 * 1000L
                     var shouldSave = false
                     
-                    // BULLETPROOF APPROACH: Use elapsed time since timer started as PRIMARY mechanism
-                    // This ensures we always decrement correctly even if foreground detection fails
+                    // Use UsageStatsManager to track actual usage time (only counts time when reward apps are in foreground)
+                    // This is the correct approach since getActualRewardAppUsageMinutes already only counts foreground time
                     val timeSinceStart = now - rewardTimeStartTime
-                    val elapsedMinutes = (timeSinceStart / oneMinuteInMillis).toInt()
-                    val expectedMinutesRemaining = rewardTimeStartMinutes - elapsedMinutes
                     
-                    // Try to use UsageStatsManager for validation/adjustment (if permission available)
                     if (hasUsageStatsPermission(context)) {
                         // Wait at least 30 seconds before checking UsageStats to avoid historical data
                         val minimumTimeForUsageCheck = 30 * 1000L
                         
                         if (timeSinceStart >= minimumTimeForUsageCheck) {
                             val actualUsageMinutes = getActualRewardAppUsageMinutes(context, rewardTimeStartTime, now)
-                            val maxPossibleUsageMinutes = ((timeSinceStart / oneMinuteInMillis) + 1).toInt()
-                            val safeActualUsage = actualUsageMinutes.coerceAtMost(maxPossibleUsageMinutes)
                             
-                            // Use UsageStats value if available, but ensure we don't go below elapsed time
-                            val usageBasedRemaining = rewardTimeStartMinutes - safeActualUsage
-                            val timeBasedRemaining = expectedMinutesRemaining
-                            
-                            // Use the lower of the two (more conservative - ensures we don't give extra time)
-                            val newCurrentMinutes = minOf(usageBasedRemaining, timeBasedRemaining).coerceAtLeast(0)
+                            // Use ONLY actual usage time (which only counts time when reward apps are in foreground)
+                            val usageBasedRemaining = rewardTimeStartMinutes - actualUsageMinutes
+                            val newCurrentMinutes = usageBasedRemaining.coerceAtLeast(0)
                             
                             if (newCurrentMinutes != currentRewardMinutes) {
-                                Log.d(TAG, "UsageStats: elapsed=${timeSinceStart/1000}s, elapsedMinutes=$elapsedMinutes, actualUsage=$safeActualUsage min, expectedRemaining=$timeBasedRemaining, usageRemaining=$usageBasedRemaining, updating from $currentRewardMinutes to $newCurrentMinutes minutes")
+                                Log.d(TAG, "UsageStats: actualUsage=$actualUsageMinutes min, updating from $currentRewardMinutes to $newCurrentMinutes minutes")
                                 currentRewardMinutes = newCurrentMinutes
                                 shouldSave = true
                                 lastUsageCheckTime = now
@@ -554,60 +546,25 @@ object RewardManager {
                                     lastUsageCheckTime = now
                                     // Only log periodic saves every 5 minutes to reduce log spam
                                     if (now - lastPeriodicSaveLogTime >= 5 * oneMinuteInMillis) {
-                                        Log.d(TAG, "Periodic save (UsageStats): elapsed=${timeSinceStart/1000}s, current=$currentRewardMinutes minutes")
+                                        Log.d(TAG, "Periodic save (UsageStats): current=$currentRewardMinutes minutes")
                                         lastPeriodicSaveLogTime = now
                                     }
                                 }
                             }
                         } else {
-                            // Too soon for UsageStats - use elapsed time only, but still save periodically
-                            val newCurrentMinutes = expectedMinutesRemaining.coerceAtLeast(0)
-                            val previousMinutes = currentRewardMinutes
-                            if (newCurrentMinutes != currentRewardMinutes) {
-                                currentRewardMinutes = newCurrentMinutes
-                                shouldSave = true
-                                Log.d(TAG, "Early timer: elapsed=${timeSinceStart/1000}s, updating from $previousMinutes to $newCurrentMinutes minutes")
-                            }
-                            // Still do periodic save even if value unchanged
+                            // Too soon for UsageStats - don't decrement yet (prevents counting time on launcher)
+                            // Just save periodically to ensure state is saved
                             val timeSinceLastSave = now - lastUsageCheckTime
                             if (timeSinceLastSave >= oneMinuteInMillis) {
                                 shouldSave = true
                                 lastUsageCheckTime = now
-                                // Only log periodic saves every 5 minutes to reduce log spam
-                                if (now - lastPeriodicSaveLogTime >= 5 * oneMinuteInMillis) {
-                                    Log.d(TAG, "Periodic save (early timer): elapsed=${timeSinceStart/1000}s, current=$currentRewardMinutes minutes")
-                                    lastPeriodicSaveLogTime = now
-                                }
                             }
                         }
                     } else {
-                        // Fallback: Timer-based tracking - BULLETPROOF: Use elapsed time as PRIMARY mechanism
-                        // When reward time is active (timer running), decrement based on elapsed time
-                        // The timer being active means reward apps were granted access, so we count the time
-                        // This ensures we NEVER get out of sync even if foreground detection fails
-                        val newCurrentMinutes = expectedMinutesRemaining.coerceAtLeast(0)
-                        val previousMinutes = currentRewardMinutes
-                        val isRewardAppActive = isRewardAppInForeground(context)
-                        
-                        // ALWAYS update based on elapsed time - this is bulletproof
-                        // The timer running means reward time was granted, so we count elapsed time
-                        if (newCurrentMinutes != currentRewardMinutes) {
-                            currentRewardMinutes = newCurrentMinutes
-                            shouldSave = true
-                            Log.d(TAG, "Timer-based: elapsed=${timeSinceStart/1000}s, elapsedMinutes=$elapsedMinutes, rewardAppActive=$isRewardAppActive, updating from $previousMinutes to $newCurrentMinutes minutes")
-                        }
-                        
-                        // ALWAYS save every minute as a safety net to prevent sync issues
-                        val timeSinceLastSave = now - lastRewardDecrementTime
-                        if (timeSinceLastSave >= oneMinuteInMillis) {
-                            shouldSave = true
-                            lastRewardDecrementTime = now
-                            // Only log periodic saves every 5 minutes to reduce log spam
-                            if (now - lastPeriodicSaveLogTime >= 5 * oneMinuteInMillis) {
-                                Log.d(TAG, "Periodic save (timer-based): elapsed=${timeSinceStart/1000}s, current=$currentRewardMinutes minutes")
-                                lastPeriodicSaveLogTime = now
-                            }
-                        }
+                        // Fallback: Without UsageStats permission, we can't accurately track foreground-only time
+                        // This is a limitation - we need UsageStats permission to track foreground-only time
+                        Log.w(TAG, "UsageStats permission not available - cannot track foreground-only time accurately")
+                        // Don't decrement without UsageStats permission since we can't determine foreground state accurately
                     }
                     
                     // Save to local storage and cloud if we need to

@@ -553,8 +553,35 @@ object SettingsManager {
     }
 
     /**
+     * Checks if daily reset is needed and triggers it if necessary
+     * This should be called FIRST before any syncing operations
+     * This function is async and returns immediately - the reset happens in the background
+     */
+    fun checkAndTriggerResetIfNeeded(context: Context) {
+        settingsScope.launch {
+            try {
+                val profile = ProfileManager.getCurrentProfile(context)
+                val needsReset = CloudSyncManager.checkIfResetNeeded(context, profile)
+                if (needsReset) {
+                    Log.d(TAG, "Reset needed for profile: $profile, triggering cloud reset")
+                    val success = CloudSyncManager.triggerCloudReset(context, profile)
+                    if (success) {
+                        Log.d(TAG, "Successfully triggered cloud reset for profile: $profile")
+                    } else {
+                        Log.w(TAG, "Failed to trigger cloud reset for profile: $profile")
+                    }
+                } else {
+                    Log.d(TAG, "No reset needed for profile: $profile")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error checking/triggering reset: ${e.message}", e)
+            }
+        }
+    }
+    
+    /**
      * Downloads user_data from cloud for the current profile and applies it locally
-     * This should be called when profile changes or on app startup
+     * This should be called AFTER checkAndTriggerResetIfNeeded() on app startup
      * (Delegates to CloudSyncManager)
      */
     fun downloadUserDataFromCloud(context: Context) {
