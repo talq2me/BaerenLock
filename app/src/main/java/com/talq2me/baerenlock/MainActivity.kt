@@ -357,6 +357,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onResume() {
         super.onResume()
+        
+        // Run daily_reset_process() and then cloud_sync() on main screen load/on focus
+        val profile = ProfileManager.getCurrentProfile(this)
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                DailyResetAndSyncManager.dailyResetProcessAndSync(this@MainActivity, profile)
+                Log.d(TAG, "Daily reset and sync completed in onResume for profile: $profile")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during daily reset and sync in onResume", e)
+            }
+        }
     }
 
     override fun onDestroy() {
