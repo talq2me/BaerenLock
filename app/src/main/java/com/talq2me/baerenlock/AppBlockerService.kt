@@ -50,6 +50,15 @@ class AppBlockerService : AccessibilityService() {
         }
     }
 
+    private val rewardTimerCheck = object : Runnable {
+        override fun run() {
+            // Check and update reward time - this runs even when BaerenLock is in background
+            checkAndUpdateRewardTime()
+            // Schedule next check - every 5 seconds for accurate tracking
+            backgroundHandler.postDelayed(this, 5000)
+        }
+    }
+
     private lateinit var devicePolicyManager: com.talq2me.baerenlock.DevicePolicyManager
     private var chromeJeLisUrl: String? = null // Track if Chrome is viewing JeLis
     private var chromeLaunchedFromBaerenEd: Boolean = false // Track if Chrome was launched from BaerenEd
@@ -161,6 +170,10 @@ class AppBlockerService : AccessibilityService() {
         // Start background app cleanup
         backgroundHandler.post(backgroundCleanupCheck)
         
+        // Start reward timer check (runs every 5 seconds even when BaerenLock is in background)
+        backgroundHandler.post(rewardTimerCheck)
+        Log.d("AppBlocker", "Started background reward timer check (every 5 seconds)")
+        
         // Start health check monitoring
         lastEventTime = System.currentTimeMillis()
         backgroundHandler.postDelayed(healthCheckRunnable, 60000) // Start after 1 minute
@@ -171,6 +184,7 @@ class AppBlockerService : AccessibilityService() {
         backgroundHandler.removeCallbacks(periodicCheck)
         backgroundHandler.removeCallbacks(usageCheck)
         backgroundHandler.removeCallbacks(backgroundCleanupCheck)
+        backgroundHandler.removeCallbacks(rewardTimerCheck)
         backgroundHandler.removeCallbacks(healthCheckRunnable)
         backgroundThread.quitSafely()
         stopForeground(true)
@@ -464,6 +478,20 @@ class AppBlockerService : AccessibilityService() {
             RewardManager.killUnauthorizedBackgroundApps(this)
         } catch (e: Exception) {
             Log.e("AppBlocker", "Error during background app cleanup", e)
+        }
+    }
+
+    /**
+     * Checks and updates reward time - called periodically from background thread.
+     * This runs even when BaerenLock is in the background, ensuring accurate time tracking.
+     */
+    private fun checkAndUpdateRewardTime() {
+        try {
+            // Call RewardManager to perform a single timer check/update iteration
+            // This will check UsageStats, calculate time used, and save if needed
+            RewardManager.performTimerCheck(this)
+        } catch (e: Exception) {
+            Log.e("AppBlocker", "Error checking/updating reward time", e)
         }
     }
 

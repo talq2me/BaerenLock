@@ -378,6 +378,178 @@ object RewardManager {
     }
     
     /**
+     * Performs a single timer check iteration - called from AppBlockerService background thread.
+     * This allows the reward timer to run even when BaerenLock is in the background.
+     */
+    fun performTimerCheck(context: Context) {
+        // Only check if we have reward minutes
+        if (currentRewardMinutes <= 0) {
+            // No reward time - ensure timer state is reset
+            if (rewardTimeStartTime != 0L) {
+                Log.d(TAG, "No reward minutes, resetting timer state")
+                rewardTimeStartTime = 0L
+                rewardTimeStartMinutes = 0
+                lastUsageCheckTime = 0L
+                lastPeriodicSaveLogTime = 0L
+                lastRewardDecrementTime = 0L
+            }
+            return
+        }
+        
+        val now = System.currentTimeMillis()
+        val oneMinuteInMillis = 60 * 1000L
+        var shouldSave = false
+        
+        // Initialize timer state if this is the first check
+        if (rewardTimeStartTime == 0L) {
+            rewardTimeStartTime = now
+            rewardTimeStartMinutes = currentRewardMinutes
+            lastUsageCheckTime = now
+            lastRewardDecrementTime = now
+            Log.d(TAG, "Initialized reward timer state: startTime=$now, startMinutes=$rewardTimeStartMinutes")
+            
+            // Start reward session tracking for usage reporting
+            startRewardSessionTracking(context)
+        }
+        
+        // Use UsageStatsManager to track actual usage time (only counts time when reward apps are in foreground)
+        val timeSinceStart = now - rewardTimeStartTime
+        
+        if (hasUsageStatsPermission(context)) {
+            // Wait at least 30 seconds before checking UsageStats to avoid historical data
+            val minimumTimeForUsageCheck = 30 * 1000L
+            
+            if (timeSinceStart >= minimumTimeForUsageCheck) {
+                val actualUsageMinutes = getActualRewardAppUsageMinutes(context, rewardTimeStartTime, now)
+                
+                // Use ONLY actual usage time (which only counts time when reward apps are in foreground)
+                val usageBasedRemaining = rewardTimeStartMinutes - actualUsageMinutes
+                val newCurrentMinutes = usageBasedRemaining.coerceAtLeast(0)
+                
+                if (newCurrentMinutes != currentRewardMinutes) {
+                    Log.d(TAG, "UsageStats: actualUsage=$actualUsageMinutes min, updating from $currentRewardMinutes to $newCurrentMinutes minutes")
+                    currentRewardMinutes = newCurrentMinutes
+                    shouldSave = true
+                    lastUsageCheckTime = now
+                    
+                    // Notify LauncherActivity if reward time changed
+                    notifyRewardTimeChanged(context)
+                } else {
+                    // Even if value hasn't changed, save periodically (every minute) as safety net
+                    val timeSinceLastSave = now - lastUsageCheckTime
+                    if (timeSinceLastSave >= oneMinuteInMillis) {
+                        shouldSave = true
+                        lastUsageCheckTime = now
+                        // Only log periodic saves every 5 minutes to reduce log spam
+                        if (now - lastPeriodicSaveLogTime >= 5 * oneMinuteInMillis) {
+                            Log.d(TAG, "Periodic save (UsageStats): current=$currentRewardMinutes minutes")
+                            lastPeriodicSaveLogTime = now
+                        }
+                    }
+                }
+            } else {
+                // Too soon for UsageStats - don't decrement yet (prevents counting time on launcher)
+                // Just save periodically to ensure state is saved
+                val timeSinceLastSave = now - lastUsageCheckTime
+                if (timeSinceLastSave >= oneMinuteInMillis) {
+                    shouldSave = true
+                    lastUsageCheckTime = now
+                }
+            }
+        } else {
+            // CRITICAL: Without UsageStats permission, we can't track time accurately
+            // Log this warning periodically (every 30 seconds) to avoid log spam
+            val timeSinceLastSave = now - lastUsageCheckTime
+            if (timeSinceLastSave >= 30 * 1000L) {
+                Log.e(TAG, "⚠️ CRITICAL: UsageStats permission NOT granted! Reward timer cannot decrement. Grant permission in Settings > Apps > BaerenLock > Permissions > Usage access")
+                lastUsageCheckTime = now
+            }
+            // Don't decrement without UsageStats permission since we can't determine foreground state accurately
+        }
+        
+        // Save to local storage and cloud if we need to
+        if (shouldSave) {
+            saveRewardMinutes(context)
+        }
+        
+        // Check if reward time has expired
+        if (currentRewardMinutes == 0) {
+            handleRewardTimeExpired(context)
+        }
+    }
+    
+    /**
+     * Handles reward time expiration - clears temporary apps, kills reward apps, returns to launcher
+     */
+    private fun handleRewardTimeExpired(context: Context) {
+        Log.d(TAG, "Reward time expired. Temporary apps removed. Killing reward apps.")
+        
+        // Reward time is up, remove temporary apps
+        RewardAppsManager.clearTemporaryApps(context)
+        
+        // End reward session tracking and send broadcast with usage data
+        val usageData = endRewardSessionTracking()
+        Log.d(TAG, "Reward time expired. Usage data: ${if (usageData != null) "available (${usageData.first.size} sessions)" else "null"}")
+        
+        // Notify launcher
+        val intent = Intent(LauncherActivity.ACTION_REWARD_EXPIRED).apply {
+            putExtra("has_usage_data", usageData != null)
+        }
+        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
+        Log.d(TAG, "Sent ACTION_REWARD_EXPIRED broadcast.")
+        
+        // Reset timer state
+        rewardTimeStartTime = 0L
+        rewardTimeStartMinutes = 0
+        lastUsageCheckTime = 0L
+        lastPeriodicSaveLogTime = 0L
+        lastRewardDecrementTime = 0L
+        
+        // Force return to BaerenLock launcher
+        returnToLauncher(context)
+        
+        // Kill reward-eligible apps after a delay
+        Handler(Looper.getMainLooper()).postDelayed({
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            for (pkg in rewardEligibleAppsSet) {
+                try {
+                    am.killBackgroundProcesses(pkg)
+                    Log.d(TAG, "Killed reward-eligible app: $pkg")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to kill reward-eligible app $pkg: ${e.message}")
+                }
+            }
+            Log.d(TAG, "Reward apps killed. AppBlockerService will block them if they try to restart.")
+        }, 500)
+    }
+    
+    /**
+     * Returns to launcher
+     */
+    private fun returnToLauncher(context: Context) {
+        try {
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            context.startActivity(homeIntent)
+            Log.d(TAG, "Launched HOME intent to return to BaerenLock launcher")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to return to launcher: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Notifies LauncherActivity that reward time changed (to update UI)
+     */
+    private fun notifyRewardTimeChanged(context: Context) {
+        val intent = Intent(RewardTimeReceiver.ACTION_REWARD_TIME_UPDATED)
+        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
+    }
+    
+    /**
      * Checks if UsageStats permission is granted.
      */
     private fun hasUsageStatsPermission(context: Context): Boolean {
