@@ -30,6 +30,7 @@ class AppBlockerService : AccessibilityService() {
     private val periodicCheck = object : Runnable {
         override fun run() {
             checkForegroundApp()
+            // Schedule next check - ensure it always continues
             backgroundHandler.postDelayed(this, 2000) // Check every 2 seconds
         }
     }
@@ -37,7 +38,8 @@ class AppBlockerService : AccessibilityService() {
     private val usageCheck = object : Runnable {
         override fun run() {
             checkUsageStats()
-            backgroundHandler.postDelayed(this, 2000)
+            // Schedule next check - ensure it always continues
+            backgroundHandler.postDelayed(this, 2000) // Check every 2 seconds
         }
     }
 
@@ -143,13 +145,16 @@ class AppBlockerService : AccessibilityService() {
         // Initialize Device Policy Manager
         devicePolicyManager = com.talq2me.baerenlock.DevicePolicyManager.getInstance(this)
 
+        // Start periodic foreground app checks (runs every 2 seconds)
         backgroundHandler.post(periodicCheck)
-        // Start UsageStats polling
+        Log.d("AppBlocker", "Started periodic foreground app check (every 2 seconds)")
+        
+        // Start UsageStats polling (more reliable than ActivityManager)
         if (!hasUsageStatsPermission()) {
             Log.d("AppBlocker", "USAGESTATS: UsageStats permission NOT granted. Prompting user.")
             promptForUsageAccess()
         } else {
-            Log.d("AppBlocker", "USAGESTATS: UsageStats permission granted. Starting usage check.")
+            Log.d("AppBlocker", "USAGESTATS: UsageStats permission granted. Starting usage check (every 2 seconds).")
             backgroundHandler.post(usageCheck)
         }
 
@@ -208,6 +213,14 @@ class AppBlockerService : AccessibilityService() {
 
     private fun checkForegroundApp() {
         try {
+            // Try UsageStats first if available (most reliable)
+            if (hasUsageStatsPermission()) {
+                // UsageStats is handled by checkUsageStats() which runs separately
+                // This method serves as a fallback when UsageStats permission is not granted
+                return
+            }
+            
+            // Fallback to ActivityManager (less reliable, deprecated, but better than nothing)
             val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
             val processes = am.runningAppProcesses
             
@@ -221,7 +234,7 @@ class AppBlockerService : AccessibilityService() {
 
                         // Check if this app should be blocked
                         if (shouldBlockApp(pkgName)) {
-                            Log.d("AppBlocker", "🚫 BLOCKING app: $pkgName")
+                            Log.d("AppBlocker", "🚫 BLOCKING app: $pkgName (via ActivityManager)")
                             
                             // Show toast with package name
                             Handler(Looper.getMainLooper()).post {
@@ -321,10 +334,16 @@ class AppBlockerService : AccessibilityService() {
         }
 
         // Block if it's a reward-eligible app with 0 minutes (expired reward)
+        // IMPORTANT: Read directly from storage to avoid race conditions with in-memory cache
         val isRewardApp = RewardManager.rewardEligibleApps.contains(pkgName)
-        val hasRewardMinutes = RewardManager.currentRewardMinutes > 0
-        if (isRewardApp && !hasRewardMinutes) {
-            return true
+        if (isRewardApp) {
+            // Read directly from SharedPreferences to get the most up-to-date value
+            val storedRewardMinutes = RewardStorage.getCurrentRewardMinutesFromStorage(this)
+            val hasRewardMinutes = storedRewardMinutes > 0
+            if (!hasRewardMinutes) {
+                Log.d("AppBlocker", "🚫 Blocking reward app $pkgName: storedRewardMinutes=$storedRewardMinutes (reward time expired)")
+                return true
+            }
         }
 
         // Everything else is allowed (not blocked)
@@ -401,7 +420,8 @@ class AppBlockerService : AccessibilityService() {
         try {
             val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
             val end = System.currentTimeMillis()
-            val begin = end - (15 * 60 * 1000) // last 15 minutes
+            // Query only last 5 seconds for real-time blocking (more efficient than 15 minutes)
+            val begin = end - 5000 // last 5 seconds
             val events = usm.queryEvents(begin, end)
             val event = UsageEvents.Event()
             var lastForeground: String? = null
@@ -418,7 +438,7 @@ class AppBlockerService : AccessibilityService() {
             
             // Check if this app should be blocked
             if (shouldBlockApp(pkgName)) {
-                Log.d("AppBlocker", "🚫 BLOCKING app: $pkgName")
+                Log.d("AppBlocker", "🚫 BLOCKING app: $pkgName (via UsageStats, rewardMinutes=0)")
                 
                 // Show toast with package name
                 Handler(Looper.getMainLooper()).post {

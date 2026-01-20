@@ -29,6 +29,16 @@ object RewardStorage {
     }
     
     /**
+     * Gets the current reward minutes directly from SharedPreferences.
+     * Use this when you need to ensure you're reading the latest persisted value,
+     * bypassing the in-memory cache (useful for avoiding race conditions).
+     */
+    fun getCurrentRewardMinutesFromStorage(context: Context): Int {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getInt(KEY_CURRENT_REWARD_MINUTES, 0)
+    }
+    
+    /**
      * Sets the current reward minutes in memory (does not persist)
      */
     fun setCurrentRewardMinutes(minutes: Int) {
