@@ -40,6 +40,10 @@ object BlacklistManager {
                 prefs.edit().putStringSet(PACKAGES_KEY, blacklist).apply()
                 settingsPrefs.edit().putString("app_lists_timestamp", timestamp).apply()
                 Log.d(TAG, "Added $packageName to blacklist, timestamp: $timestamp")
+                
+                // Update last_updated timestamp to trigger cloud sync (as per Daily Reset Logic)
+                val profile = ProfileManager.getCurrentProfile(context)
+                updateLastUpdatedTimestamp(context, profile)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error adding to blacklist", e)
@@ -60,6 +64,10 @@ object BlacklistManager {
                 prefs.edit().putStringSet(PACKAGES_KEY, blacklist).apply()
                 settingsPrefs.edit().putString("app_lists_timestamp", timestamp).apply()
                 Log.d(TAG, "Removed $packageName from blacklist, timestamp: $timestamp")
+                
+                // Update last_updated timestamp to trigger cloud sync (as per Daily Reset Logic)
+                val profile = ProfileManager.getCurrentProfile(context)
+                updateLastUpdatedTimestamp(context, profile)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error removing from blacklist", e)
@@ -78,6 +86,10 @@ object BlacklistManager {
             prefs.edit().remove(PACKAGES_KEY).apply()
             settingsPrefs.edit().putString("app_lists_timestamp", timestamp).apply()
             Log.d(TAG, "Cleared all blacklist entries, timestamp: $timestamp")
+            
+            // Update last_updated timestamp to trigger cloud sync (as per Daily Reset Logic)
+            val profile = ProfileManager.getCurrentProfile(context)
+            updateLastUpdatedTimestamp(context, profile)
         } catch (e: Exception) {
             Log.e(TAG, "Error clearing blacklist", e)
         }
@@ -88,5 +100,17 @@ object BlacklistManager {
      */
     fun isBlacklisted(context: Context, packageName: String): Boolean {
         return getBlacklist(context).contains(packageName)
+    }
+    
+    /**
+     * Updates last_updated timestamp in settings prefs to trigger cloud sync
+     * This is called whenever settings that should sync to cloud are changed (as per Daily Reset Logic)
+     */
+    private fun updateLastUpdatedTimestamp(context: Context, profile: String) {
+        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val timestamp = CloudSyncManager.generateESTTimestamp()
+        val key = "${profile}_last_updated_timestamp"
+        prefs.edit().putString(key, timestamp).apply()
+        Log.d(TAG, "Updated last_updated timestamp for profile $profile: $timestamp")
     }
 }

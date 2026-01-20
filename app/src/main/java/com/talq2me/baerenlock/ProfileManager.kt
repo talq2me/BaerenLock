@@ -55,9 +55,24 @@ object ProfileManager {
         }
         Log.d(TAG, "Profile written: $profile, timestamp: $timestamp")
         
+        // Update last_updated timestamp to trigger cloud sync (as per Daily Reset Logic)
+        updateLastUpdatedTimestamp(context, profile)
+        
         // Sync to cloud devices table asynchronously
         // Force update since this is a user-initiated profile change
         CloudSyncManager.syncActiveProfileToCloudAsync(context, profile, forceUpdate = true)
+    }
+    
+    /**
+     * Updates last_updated timestamp in settings prefs to trigger cloud sync
+     * This is called whenever settings that should sync to cloud are changed (as per Daily Reset Logic)
+     */
+    private fun updateLastUpdatedTimestamp(context: Context, profile: String) {
+        val prefs = context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
+        val timestamp = CloudSyncManager.generateESTTimestamp()
+        val key = "${profile}_last_updated_timestamp"
+        prefs.edit().putString(key, timestamp).apply()
+        Log.d(TAG, "Updated last_updated timestamp for profile $profile: $timestamp")
     }
     
     /**

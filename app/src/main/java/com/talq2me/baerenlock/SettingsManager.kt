@@ -282,6 +282,10 @@ object SettingsManager {
         prefs.edit().putString("settings_timestamp", estTimestamp).apply()
         Log.d(TAG, "Updated local settings timestamp after PIN change: $estTimestamp")
         
+        // Update last_updated timestamp to trigger cloud sync (as per Daily Reset Logic)
+        val profile = ProfileManager.getCurrentProfile(context)
+        updateLastUpdatedTimestamp(context, profile)
+        
         // Attempt to save to cloud asynchronously
         settingsScope.launch {
             try {
@@ -365,6 +369,10 @@ object SettingsManager {
         prefs.edit().putString("settings_timestamp", estTimestamp).apply()
         Log.d(TAG, "Updated local settings timestamp after email change: $estTimestamp")
         
+        // Update last_updated timestamp to trigger cloud sync (as per Daily Reset Logic)
+        val profile = ProfileManager.getCurrentProfile(context)
+        updateLastUpdatedTimestamp(context, profile)
+        
         settingsScope.launch {
             try {
                 val currentSettings = cachedSettings ?: loadSettingsFromLocal(context)
@@ -430,6 +438,10 @@ object SettingsManager {
             apply()
         }
         Log.d(TAG, "Saved ${newRewardApps.size} reward apps locally, timestamp: $timestamp")
+        
+        // Update last_updated timestamp to trigger cloud sync (as per Daily Reset Logic)
+        val profile = ProfileManager.getCurrentProfile(context)
+        updateLastUpdatedTimestamp(context, profile)
         
         // Sync to cloud user_data table asynchronously
         CloudSyncManager.syncAppListsToCloudAsync(context)
@@ -731,6 +743,18 @@ object SettingsManager {
                 false
             }
         }
+    }
+    
+    /**
+     * Updates last_updated timestamp in settings prefs to trigger cloud sync
+     * This is called whenever settings that should sync to cloud are changed (as per Daily Reset Logic)
+     */
+    private fun updateLastUpdatedTimestamp(context: Context, profile: String) {
+        val prefs = context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
+        val timestamp = CloudSyncManager.generateESTTimestamp()
+        val key = "${profile}_last_updated_timestamp"
+        prefs.edit().putString(key, timestamp).apply()
+        Log.d(TAG, "Updated last_updated timestamp for profile $profile: $timestamp")
     }
 }
 
