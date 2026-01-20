@@ -376,8 +376,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         } catch (e: IllegalArgumentException) {
             Log.w("MainActivity", "Reward report receiver already unregistered")
         }
-        tts.stop()
-        tts.shutdown()
+        // Check if tts was initialized before trying to use it
+        if (::tts.isInitialized) {
+            tts.stop()
+            tts.shutdown()
+        }
         super.onDestroy()
     }
 
