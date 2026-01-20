@@ -257,7 +257,6 @@ class LauncherActivity : AppCompatActivity() {
         // Refresh background image in case it was cleared from memory or profile changed
         refreshBackgroundImage()
         
-        refreshIcons(appGrid)
         // Banner will be updated by performHealthCheck() which calls updateHealthBanner()
 
         // Download user_data from cloud for current profile (to get accurate reward minutes)
@@ -267,6 +266,8 @@ class LauncherActivity : AppCompatActivity() {
         // Update cloud toggle state
         updateCloudToggleState()
         
+        // CRITICAL: Load reward minutes BEFORE refreshing icons
+        // This ensures the launcher shows reward apps when banked_mins > 0
         RewardManager.loadRewardMinutes(this)
         if (RewardManager.currentRewardMinutes > 0) {
             RewardManager.startRewardTimer(this)
@@ -274,6 +275,9 @@ class LauncherActivity : AppCompatActivity() {
 
         // Check for reward minutes from intent (in case we missed it in onCreate/onNewIntent)
         processIncomingRewardMinutes(intent)
+
+        // Refresh icons AFTER loading reward minutes to ensure reward apps show when banked_mins > 0
+        refreshIcons(appGrid)
 
         startRewardDisplayUpdate()
 
@@ -316,6 +320,16 @@ class LauncherActivity : AppCompatActivity() {
             // Only update text if it changed (avoid unnecessary UI updates)
             if (minutes != lastDisplayedRewardMinutes) {
                 rewardMinutesTextView?.text = "Reward: $minutes min"
+                
+                // CRITICAL: Refresh icons when reward minutes cross the zero threshold
+                // This ensures reward apps appear/disappear when banked_mins changes
+                val crossedZeroThreshold = (lastDisplayedRewardMinutes == 0 && minutes > 0) ||
+                                         (lastDisplayedRewardMinutes > 0 && minutes == 0)
+                if (crossedZeroThreshold) {
+                    Log.d(TAG, "Reward minutes crossed zero threshold ($lastDisplayedRewardMinutes -> $minutes), refreshing icons")
+                    refreshIcons(appGrid)
+                }
+                
                 lastDisplayedRewardMinutes = minutes
             }
             // Don't refresh icons every second - only refresh when apps list actually changes
