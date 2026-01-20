@@ -482,7 +482,12 @@ object RewardManager {
      * Falls back to timer-based tracking if UsageStats permission is not available.
      */
     fun startRewardTimer(context: Context) {
-        Log.d(TAG, "startRewardTimer called. Current minutes: $currentRewardMinutes, timer already running: ${rewardRunnable != null}")
+        val hasUsageStats = hasUsageStatsPermission(context)
+        Log.d(TAG, "startRewardTimer called. Current minutes: $currentRewardMinutes, timer already running: ${rewardRunnable != null}, UsageStats permission: $hasUsageStats")
+        
+        if (!hasUsageStats) {
+            Log.e(TAG, "⚠️ CRITICAL: Starting reward timer but UsageStats permission is NOT granted! Timer will NOT decrement time. Grant permission in Settings > Apps > BaerenLock > Permissions > Usage access")
+        }
         
         // If timer is already running and we have reward minutes, don't restart it
         if (rewardRunnable != null && currentRewardMinutes > 0) {
@@ -561,9 +566,13 @@ object RewardManager {
                             }
                         }
                     } else {
-                        // Fallback: Without UsageStats permission, we can't accurately track foreground-only time
-                        // This is a limitation - we need UsageStats permission to track foreground-only time
-                        Log.w(TAG, "UsageStats permission not available - cannot track foreground-only time accurately")
+                        // CRITICAL: Without UsageStats permission, we can't track time accurately
+                        // Log this warning periodically (every 30 seconds) to avoid log spam
+                        val timeSinceLastSave = now - lastUsageCheckTime
+                        if (timeSinceLastSave >= 30 * 1000L) {
+                            Log.e(TAG, "⚠️ CRITICAL: UsageStats permission NOT granted! Reward timer cannot decrement. Grant permission in Settings > Apps > BaerenLock > Permissions > Usage access")
+                            lastUsageCheckTime = now
+                        }
                         // Don't decrement without UsageStats permission since we can't determine foreground state accurately
                     }
                     

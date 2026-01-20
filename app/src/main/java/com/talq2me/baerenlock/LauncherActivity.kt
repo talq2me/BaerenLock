@@ -1073,12 +1073,17 @@ class LauncherActivity : AppCompatActivity() {
             return
         }
         
-        // Determine which issue to show (prioritize overlay, then accessibility, then battery, then others)
-        // Overlay permission is checked first because it's a simpler permission and less likely to have false positives
+        // Determine which issue to show
+        // CRITICAL: UsageStats is now prioritized first because without it, reward timer won't work at all!
+        // Priority: UsageStats -> Overlay -> Accessibility -> Battery -> Launcher
         val issue: String
         val intent: Intent
         
         when {
+            healthResult.usageStatsStatus == ServiceHealthMonitor.HealthStatus.DISABLED -> {
+                issue = "Enable Usage Stats (Required for Reward Timer)"
+                intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+            }
             healthResult.overlayPermissionStatus != ServiceHealthMonitor.HealthStatus.HEALTHY -> {
                 issue = "Enable Display Over Other Apps"
                 intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
@@ -1094,10 +1099,6 @@ class LauncherActivity : AppCompatActivity() {
                 intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                     data = Uri.parse("package:$packageName")
                 }
-            }
-            healthResult.usageStatsStatus == ServiceHealthMonitor.HealthStatus.DISABLED -> {
-                issue = "Enable Usage Stats Permission"
-                intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
             }
             healthResult.defaultLauncherStatus != ServiceHealthMonitor.HealthStatus.HEALTHY -> {
                 issue = "Set BaerenLock as Default Launcher"
