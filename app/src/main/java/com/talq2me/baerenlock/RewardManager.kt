@@ -426,11 +426,29 @@ object RewardManager {
                 val usageBasedRemaining = rewardTimeStartMinutes - actualUsageMinutes
                 val newCurrentMinutes = usageBasedRemaining.coerceAtLeast(0)
                 
-                if (newCurrentMinutes != currentRewardMinutes) {
+                // Only decrement if:
+                // 1. The value actually changed
+                // 2. At least 60 seconds have passed since last decrement (prevents multiple decrements per minute)
+                // 3. We've actually used at least 1 minute (prevents decrementing due to historical UsageStats data)
+                val timeSinceLastDecrement = now - lastRewardDecrementTime
+                val hasUsedAtLeastOneMinute = actualUsageMinutes >= 1
+                val canDecrement = (newCurrentMinutes != currentRewardMinutes) && 
+                                   (timeSinceLastDecrement >= oneMinuteInMillis) && 
+                                   hasUsedAtLeastOneMinute
+                
+                if (canDecrement) {
                     Log.d(TAG, "UsageStats: actualUsage=$actualUsageMinutes min, updating from $currentRewardMinutes to $newCurrentMinutes minutes")
                     currentRewardMinutes = newCurrentMinutes
                     shouldSave = true
                     lastUsageCheckTime = now
+                    lastRewardDecrementTime = now
+                    
+                    // CRITICAL: Reset baseline when we decrement so future calculations are based on new value
+                    // This ensures we continue decrementing properly (e.g., 5->4->3->2->1->0)
+                    // We've already verified actualUsageMinutes >= 1 in canDecrement check
+                    rewardTimeStartTime = now
+                    rewardTimeStartMinutes = newCurrentMinutes
+                    Log.d(TAG, "Reset timer baseline: startTime=$now, startMinutes=$newCurrentMinutes (after $actualUsageMinutes min usage)")
                     
                     // Notify LauncherActivity if reward time changed
                     notifyRewardTimeChanged(context)
@@ -927,8 +945,18 @@ object RewardManager {
                 }
             }
             
+            // CRITICAL: Cap usage at elapsed time to prevent historical data from being counted
+            // UsageStats can sometimes include historical data, so we ensure usage never exceeds elapsed time
+            val elapsedTimeMillis = timeRange
+            val cappedUsageMillis = totalUsageMillis.coerceAtMost(elapsedTimeMillis)
+            
             // Convert to minutes (round down)
-            val usageMinutes = (totalUsageMillis / (60 * 1000)).toInt()
+            val usageMinutes = (cappedUsageMillis / (60 * 1000)).toInt()
+            
+            // Log warning if we had to cap the usage (indicates potential historical data issue)
+            if (totalUsageMillis > elapsedTimeMillis) {
+                Log.w(TAG, "UsageStats returned ${totalUsageMillis/1000}s usage but only ${elapsedTimeMillis/1000}s elapsed - capping to prevent historical data")
+            }
             // Only log detailed stats every 5 minutes to reduce log spam (queries happen every 5 seconds)
             val minutesSinceStart = (timeRange / (60 * 1000L)).toInt()
             if (minutesSinceStart > 0 && minutesSinceStart % 5 == 0) {
