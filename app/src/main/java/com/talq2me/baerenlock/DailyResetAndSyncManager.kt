@@ -8,6 +8,8 @@ import com.google.gson.reflect.TypeToken
 import com.talq2me.baerenlock.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -22,7 +24,7 @@ object DailyResetAndSyncManager {
     private const val TAG = "DailyResetAndSyncManager"
     private const val PREF_NAME = "settings"
     private const val KEY_PROFILE_LAST_RESET = "profile_last_reset" // Format: yyyy-MM-dd HH:mm:ss.SSS (EST)
-    private const val KEY_LAST_UPDATED = "last_updated_timestamp" // Format: ISO 8601 with EST timezone
+    private const val KEY_LAST_UPDATED = "last_updated_timestamp" // Format: yyyy-MM-dd HH:mm:ss.SSS (EST)
     
     /**
      * Performs daily reset process followed by cloud sync.
@@ -33,6 +35,9 @@ object DailyResetAndSyncManager {
      */
     suspend fun dailyResetProcessAndSync(context: Context, profile: String) = withContext(Dispatchers.IO) {
         Log.d(TAG, "Starting daily_reset_process() and cloud_sync() for profile: $profile")
+        
+        // Normalize any legacy local timestamps to EST DB format (no offset).
+        normalizeAllTimestamps(context)
         
         // Step 1: Run daily_reset_process()
         dailyResetProcess(context, profile)
@@ -73,6 +78,8 @@ object DailyResetAndSyncManager {
                 // Cloud not available after retries
                 Log.d(TAG, "Cloud last_reset not available after retries, calling reset_local()")
                 resetLocal(context, profile)
+                // CRITICAL: Immediately push reset to cloud to prevent overwrite
+                pushResetToCloud(context, profile)
             }
             isTodayInEST(cloudLastReset) -> {
                 // Cloud is today, attempt cloud sync
@@ -83,6 +90,8 @@ object DailyResetAndSyncManager {
                 // Cloud is older than today
                 Log.d(TAG, "Cloud last_reset is older than today: $cloudLastReset, calling reset_local()")
                 resetLocal(context, profile)
+                // CRITICAL: Immediately push reset to cloud to prevent overwrite
+                pushResetToCloud(context, profile)
             }
         }
     }
@@ -174,8 +183,9 @@ object DailyResetAndSyncManager {
             CloudSyncManager.syncAppListsToCloud(context)
             
             // Sync reward minutes (banked_mins)
+            // Skip timestamp check since cloud_sync() already determined local is newer
             val bankedMinutes = RewardStorage.getCurrentRewardMinutes()
-            CloudSyncManager.syncRewardMinutesToCloud(context, bankedMinutes)
+            CloudSyncManager.syncRewardMinutesToCloud(context, bankedMinutes, skipTimestampCheck = true)
             
             // Sync settings (parent_email, parent_pin)
             // Load current settings and create SettingsData for cloud sync
@@ -237,11 +247,107 @@ object DailyResetAndSyncManager {
     }
     
     /**
+     * Immediately pushes reset values to cloud after resetLocal() is called.
+     * This prevents cloud sync from overwriting the reset with old cloud data.
+     * Sets required_tasks, practice_tasks, checklist_items to null in cloud as per spec.
+     */
+    private suspend fun pushResetToCloud(context: Context, profile: String) = withContext(Dispatchers.IO) {
+        if (!CloudSyncManager.isConfigured(context)) {
+            Log.d(TAG, "Cloud storage disabled, skipping pushResetToCloud()")
+            return@withContext
+        }
+        
+        try {
+            Log.d(TAG, "pushResetToCloud() started for profile: $profile")
+            
+            val localLastReset = getLocalLastReset(context, profile)
+            val localLastUpdated = getLocalLastUpdatedTimestamp(context, profile)
+            val bankedMinutes = RewardStorage.getCurrentRewardMinutes()
+            
+            // Build update map with all reset values
+            // CRITICAL: Set required_tasks, practice_tasks, checklist_items to null as per spec
+            val updateMap = mutableMapOf<String, Any?>(
+                "last_reset" to localLastReset,
+                "last_updated" to localLastUpdated,
+                "berries_earned" to 0,
+                "banked_mins" to bankedMinutes,
+                "required_tasks" to null,  // Set to null as per spec
+                "practice_tasks" to null,   // Set to null as per spec
+                "checklist_items" to null   // Set to null as per spec
+            )
+            
+            // Also sync app lists, settings, and active profile
+            try {
+                CloudSyncManager.syncAppListsToCloud(context)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error syncing app lists during reset push", e)
+            }
+            
+            try {
+                val pin = SettingsManager.readPin(context)
+                val email = SettingsManager.readEmail(context)
+                val aggressiveCleanup = SettingsManager.readAggressiveCleanup(context)
+                val currentSettings = SettingsManager.SettingsData(
+                    profile = null,
+                    pin = pin,
+                    parentEmail = email,
+                    childName = null,
+                    rewardApps = null,
+                    aggressiveCleanup = aggressiveCleanup
+                )
+                CloudSyncManager.saveSettingsToCloud(context, currentSettings)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error syncing settings during reset push", e)
+            }
+            
+            try {
+                CloudSyncManager.syncActiveProfileToCloudAsync(context, profile, forceUpdate = true)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error syncing active profile during reset push", e)
+            }
+            
+            // Upload reset values to user_data table
+            val gson = Gson()
+            val json = gson.toJson(updateMap)
+            val baseUrl = "${CloudSyncManager.getSupabaseUrl(context)}/rest/v1/user_data"
+            val requestBody = json.toRequestBody("application/json".toMediaType())
+            
+            val updateUrl = "$baseUrl?profile=eq.$profile"
+            val client = okhttp3.OkHttpClient()
+            val supabaseKey = CloudSyncManager.getSupabaseKey(context)
+            val patchRequest = okhttp3.Request.Builder()
+                .url(updateUrl)
+                .patch(requestBody)
+                .addHeader("apikey", supabaseKey)
+                .addHeader("Authorization", "Bearer $supabaseKey")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Prefer", "return=minimal")
+                .build()
+            
+            val response = client.newCall(patchRequest).execute()
+            if (response.isSuccessful) {
+                response.close()
+                Log.d(TAG, "pushResetToCloud() completed successfully for profile: $profile")
+                Log.d(TAG, "  Set cloud: last_reset=$localLastReset, last_updated=$localLastUpdated, berries=0, banked_mins=$bankedMinutes")
+                Log.d(TAG, "  Set cloud task fields to null: required_tasks, practice_tasks, checklist_items")
+            } else {
+                val errorBody = response.body?.string() ?: "Unknown error"
+                Log.e(TAG, "Failed to push reset to cloud: ${response.code} - $errorBody")
+                response.close()
+                throw Exception("Failed to push reset to cloud: ${response.code}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error pushing reset to cloud, will retry in cloud_sync()", e)
+            // Don't throw - allow cloud_sync() to retry later
+        }
+    }
+    
+    /**
      * Resets local progress data (berries and banked_mins)
      */
     private fun resetLocalProgressData(context: Context, profile: String) {
-        // Reset banked_mins
-        RewardStorage.setCurrentRewardMinutes(0)
+        // Reset banked_mins (persisted locally)
+        RewardStorage.resetRewardMinutesLocal(context)
         
         // Note: BaerenLock doesn't directly manage berries_earned - that's managed by BaerenEd
         // But we can clear any local berries tracking if it exists
@@ -438,6 +544,63 @@ object DailyResetAndSyncManager {
         val key = "${profile}_$KEY_LAST_UPDATED"
         prefs.edit().putString(key, timestamp).apply()
     }
+
+    /**
+     * Normalizes local timestamps to EST DB format (yyyy-MM-dd HH:mm:ss.SSS, no offset).
+     */
+    private fun normalizeAllTimestamps(context: Context) {
+        val prefsNames = listOf(
+            PREF_NAME,
+            "reward_prefs",
+            "reward_report_prefs",
+            "health_prefs",
+            "com.talq2me.baerenlock.prefs",
+            "usage_data",
+            "device_owner_setup",
+            "device_restrictions",
+            "blacklist_prefs",
+            "whitelist_prefs"
+        )
+        prefsNames.forEach { name ->
+            val targetPrefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+            normalizeTimestampPrefs(targetPrefs, name)
+        }
+    }
+
+    private fun normalizeTimestampPrefs(targetPrefs: SharedPreferences, prefsName: String) {
+        val all = targetPrefs.all
+        if (all.isEmpty()) return
+
+        val estZone = TimeZone.getTimeZone("America/New_York")
+        val outputFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).apply {
+            timeZone = estZone
+        }
+        val editor = targetPrefs.edit()
+        var changed = false
+
+        all.forEach { (key, value) ->
+            val raw = value as? String ?: return@forEach
+            val isTimestampKey = key.contains("timestamp") || key.contains("last_updated") || key.contains("last_reset")
+            if (!isTimestampKey) return@forEach
+
+            val needsNormalize = raw.contains('T') || raw.endsWith("Z") || raw.matches(Regex(".*[+-]\\d{2}:\\d{2}$"))
+            if (!needsNormalize) return@forEach
+
+            val parsedMillis = parseISOTimestampAsEST(raw)
+            if (parsedMillis <= 0L) return@forEach
+
+            val normalized = outputFormat.format(Date(parsedMillis))
+            if (normalized != raw) {
+                editor.putString(key, normalized)
+                changed = true
+                Log.d(TAG, "Normalized $prefsName.$key from '$raw' to '$normalized'")
+            }
+        }
+
+        if (changed) {
+            editor.apply()
+        }
+    }
     
     /**
      * Compares two ISO timestamps (returns positive if first is newer, negative if second is newer, 0 if equal)
@@ -449,28 +612,40 @@ object DailyResetAndSyncManager {
     }
     
     /**
-     * Parses ISO timestamp as EST (milliseconds since epoch)
+     * Parses timestamp as EST (milliseconds since epoch).
+     * Accepts both DB format (yyyy-MM-dd HH:mm:ss.SSS) and ISO variants.
      */
     private fun parseISOTimestampAsEST(timestamp: String): Long {
         return try {
-            // Strip timezone suffix and parse as EST
-            var baseTimestamp = timestamp
-            if (baseTimestamp.endsWith("Z")) {
-                baseTimestamp = baseTimestamp.substringBeforeLast('Z')
-            } else if (baseTimestamp.matches(Regex(".*[+-]\\d{2}:\\d{2}$"))) {
-                val lastPlus = baseTimestamp.lastIndexOf('+')
-                val lastMinus = baseTimestamp.lastIndexOf('-')
-                val offsetStart = if (lastPlus > lastMinus) lastPlus else lastMinus
-                if (offsetStart > 10) {
-                    baseTimestamp = baseTimestamp.substring(0, offsetStart)
+            var baseTimestamp = when {
+                timestamp.endsWith("Z") -> timestamp.substringBeforeLast('Z')
+                timestamp.matches(Regex(".*[+-]\\d{2}:\\d{2}$")) -> {
+                    val offsetStart = timestamp.lastIndexOfAny(charArrayOf('+', '-'))
+                    if (offsetStart > 10) timestamp.substring(0, offsetStart) else timestamp
+                }
+                else -> timestamp
+            }
+            baseTimestamp = baseTimestamp.replace('T', ' ')
+
+            val estZone = TimeZone.getTimeZone("America/New_York")
+            val formats = listOf(
+                "yyyy-MM-dd HH:mm:ss.SSS",
+                "yyyy-MM-dd HH:mm:ss.SS",
+                "yyyy-MM-dd HH:mm:ss"
+            )
+            for (pattern in formats) {
+                try {
+                    val df = SimpleDateFormat(pattern, Locale.getDefault())
+                    df.timeZone = estZone
+                    val parsed = df.parse(baseTimestamp)
+                    if (parsed != null) return parsed.time
+                } catch (_: Exception) {
+                    // try next
                 }
             }
-            
-            val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.getDefault())
-            dateFormat.timeZone = TimeZone.getTimeZone("America/New_York")
-            dateFormat.parse(baseTimestamp)?.time ?: 0L
+            0L
         } catch (e: Exception) {
-            Log.e(TAG, "Error parsing ISO timestamp: $timestamp", e)
+            Log.e(TAG, "Error parsing timestamp: $timestamp", e)
             0L
         }
     }
@@ -485,31 +660,10 @@ object DailyResetAndSyncManager {
     }
     
     /**
-     * Converts EST timestamp string (yyyy-MM-dd HH:mm:ss.SSS) to ISO format
+     * Converts EST timestamp string to database format (no timezone suffix).
      */
     private fun convertToISOTimestamp(estTimestamp: String): String {
-        return try {
-            val timestampFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
-            timestampFormat.timeZone = TimeZone.getTimeZone("America/New_York")
-            val date = timestampFormat.parse(estTimestamp)
-            
-            if (date != null) {
-                val estTimeZone = TimeZone.getTimeZone("America/New_York")
-                val offsetMillis = estTimeZone.getOffset(date.time)
-                val offsetHours = offsetMillis / (1000 * 60 * 60)
-                val offsetMinutes = Math.abs((offsetMillis % (1000 * 60 * 60)) / (1000 * 60))
-                val offsetString = String.format("%+03d:%02d", offsetHours, offsetMinutes)
-                
-                val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.getDefault())
-                isoFormat.timeZone = estTimeZone
-                isoFormat.format(date) + offsetString
-            } else {
-                CloudSyncManager.generateESTTimestamp()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error converting to ISO timestamp", e)
-            CloudSyncManager.generateESTTimestamp()
-        }
+        return estTimestamp
     }
     
     /**

@@ -80,7 +80,29 @@ object ProfileManager {
      */
     fun getLocalProfileTimestamp(context: Context): String? {
         val prefs = context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getString(PROFILE_TIMESTAMP_KEY, null)
+        val raw = prefs.getString(PROFILE_TIMESTAMP_KEY, null) ?: return null
+        val normalized = normalizeTimestampToDbFormat(raw)
+        if (normalized != raw) {
+            prefs.edit().putString(PROFILE_TIMESTAMP_KEY, normalized).apply()
+            Log.d(TAG, "Normalized profile_timestamp from '$raw' to '$normalized'")
+        }
+        return normalized
+    }
+
+    /**
+     * Normalizes timestamps to DB format (yyyy-MM-dd HH:mm:ss.SSS, EST, no offset).
+     */
+    private fun normalizeTimestampToDbFormat(timestamp: String): String {
+        val needsNormalize = timestamp.contains('T') || timestamp.endsWith("Z") || timestamp.matches(Regex(".*[+-]\\d{2}:\\d{2}$"))
+        if (!needsNormalize) return timestamp
+
+        val parsedMillis = CloudSyncManager.parseTimestampForComparison(timestamp)
+        if (parsedMillis <= 0L) return timestamp
+
+        val estZone = java.util.TimeZone.getTimeZone("America/New_York")
+        val df = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
+        df.timeZone = estZone
+        return df.format(java.util.Date(parsedMillis))
     }
 
     /**
@@ -91,10 +113,10 @@ object ProfileManager {
     }
 
     /**
-     * Checks if a profile string is valid (AM or BM)
+     * Checks if a profile string is valid (AM, BM, or TE)
      */
     fun isValidProfile(profile: String?): Boolean {
-        return profile == "AM" || profile == "BM"
+        return profile == "AM" || profile == "BM" || profile == "TE"
     }
     
     /**

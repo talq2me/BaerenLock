@@ -44,13 +44,48 @@ object RewardStorage {
     fun setCurrentRewardMinutes(minutes: Int) {
         currentRewardMinutes = minutes
     }
+
+    /**
+     * Resets reward minutes locally without triggering a cloud sync.
+     */
+    fun resetRewardMinutesLocal(context: Context) {
+        currentRewardMinutes = 0
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val editor = prefs.edit()
+
+        editor.putInt(KEY_CURRENT_REWARD_MINUTES, 0)
+        val today = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        editor.putLong(KEY_LAST_REWARD_DATE, today)
+
+        val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
+        val now = java.util.Date()
+        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
+        dateFormat.timeZone = estTimeZone
+        val timestamp = dateFormat.format(now)
+        editor.putString(KEY_BANKED_MINS_TIMESTAMP, timestamp)
+
+        editor.apply()
+        Log.d(TAG, "Reset reward minutes locally to 0, date: $today, timestamp: $timestamp")
+    }
     
     /**
-     * Saves reward minutes to local storage and syncs to cloud.
-     * Also updates the timestamp for cloud synchronization.
+     * Saves reward minutes to local storage.
+     * Only updates last_updated timestamp if the value actually changed (as per Daily Reset Logic spec).
+     * 
+     * @param updateLastUpdated If true, update last_updated timestamp (should be true only when value changed)
      */
-    fun saveRewardMinutes(context: Context) {
+    fun saveRewardMinutes(context: Context, updateLastUpdated: Boolean = true) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        
+        // Check if value actually changed
+        val previousValue = prefs.getInt(KEY_CURRENT_REWARD_MINUTES, -1)
+        val valueChanged = previousValue != currentRewardMinutes
+        
         val editor = prefs.edit()
         editor.putInt(KEY_CURRENT_REWARD_MINUTES, currentRewardMinutes)
         // Save today's date to track daily reset
@@ -62,27 +97,26 @@ object RewardStorage {
         }.timeInMillis
         editor.putLong(KEY_LAST_REWARD_DATE, today)
         
-        // Generate and store timestamp for banked_mins (ISO 8601 format with EST timezone)
+        // Generate and store timestamp for banked_mins (EST DB format, no offset)
         val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
         val now = java.util.Date()
-        val offsetMillis = estTimeZone.getOffset(now.time)
-        val offsetHours = offsetMillis / (1000 * 60 * 60)
-        val offsetMinutes = Math.abs((offsetMillis % (1000 * 60 * 60)) / (1000 * 60))
-        val offsetString = String.format("%+03d:%02d", offsetHours, offsetMinutes)
-        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault())
+        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
         dateFormat.timeZone = estTimeZone
-        val timestamp = dateFormat.format(now) + offsetString
+        val timestamp = dateFormat.format(now)
         editor.putString(KEY_BANKED_MINS_TIMESTAMP, timestamp)
         
         editor.apply()
-        Log.d(TAG, "Saved reward minutes to SharedPreferences: $currentRewardMinutes, date: $today, timestamp: $timestamp")
+        Log.d(TAG, "Saved reward minutes to SharedPreferences: $currentRewardMinutes (was: $previousValue, changed: $valueChanged), date: $today, timestamp: $timestamp")
         
-        // Update last_updated timestamp to trigger cloud sync (as per Daily Reset Logic)
-        val profile = ProfileManager.getCurrentProfile(context)
-        updateLastUpdatedTimestamp(context, profile)
-        
-        // Sync to cloud database to keep it accurate (this will also update cloud timestamp)
-        syncRewardMinutesToCloud(context)
+        // Update last_updated timestamp ONLY if value changed (as per Daily Reset Logic spec)
+        // Note: Do NOT call update_cloud_with_local() directly - the main screen load triggers cloud_sync() automatically
+        if (updateLastUpdated && valueChanged) {
+            val profile = ProfileManager.getCurrentProfile(context)
+            updateLastUpdatedTimestamp(context, profile)
+            Log.d(TAG, "Updated last_updated timestamp because reward minutes changed: $previousValue -> $currentRewardMinutes")
+        } else if (updateLastUpdated && !valueChanged) {
+            Log.d(TAG, "Skipped updating last_updated timestamp - reward minutes unchanged ($currentRewardMinutes)")
+        }
     }
     
     /**

@@ -470,12 +470,13 @@ class LauncherActivity : AppCompatActivity() {
     private fun getOrCreateProfile(): String? {
         readProfile()?.let { return it }
 
-        val profiles = arrayOf("Profile AM", "Profile BM")
+        val profileIds = arrayOf("AM", "BM", "TE")
+        val profiles = arrayOf("Profile AM", "Profile BM", "Profile TE")
         AlertDialog.Builder(this)
             .setTitle("Select User Profile")
             .setCancelable(false)
             .setItems(profiles) { _, which ->
-                val selectedProfile = if (which == 0) "AM" else "BM"
+                val selectedProfile = profileIds.getOrElse(which) { "AM" }
                 writeProfile(selectedProfile)
                 finishAffinity()
                 startActivity(Intent(this, LauncherActivity::class.java))
@@ -778,12 +779,13 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun showChangeProfileDialog() {
-        val profiles = arrayOf("Profile AM", "Profile BM")
+        val profileIds = arrayOf("AM", "BM", "TE")
+        val profiles = arrayOf("Profile AM", "Profile BM", "Profile TE")
         val currentProfile = readProfile()
         AlertDialog.Builder(this)
             .setTitle("Select User Profile")
             .setItems(profiles) { _, which ->
-                val selectedProfile = if (which == 0) "AM" else "BM"
+                val selectedProfile = profileIds.getOrElse(which) { "AM" }
                 if (currentProfile != selectedProfile) {
                     writeProfile(selectedProfile)
                     // Download user_data from cloud for the new profile
@@ -954,7 +956,12 @@ class LauncherActivity : AppCompatActivity() {
             }
 
             // Convert AM/BM to A/B for resource file names (resources are still named bg_a_ and bg_b_)
-            val prefix = if (userProfile == "AM") "bg_a_" else "bg_b_"
+            // TE and other profiles use bg_a_ as fallback
+            val prefix = when (userProfile) {
+                "AM" -> "bg_a_"
+                "BM" -> "bg_b_"
+                else -> "bg_a_"
+            }
             val fields = R.drawable::class.java.fields
             // Only use the _orig.jpg files, not the XML files
             val drawables = fields.filter { 
@@ -1002,7 +1009,12 @@ class LauncherActivity : AppCompatActivity() {
         Log.d(TAG, "Refreshing background image for profile: $userProfile")
         
         // Convert AM/BM to A/B for resource file names (resources are still named bg_a_ and bg_b_)
-        val prefix = if (userProfile == "AM") "bg_a_" else "bg_b_"
+        // TE and other profiles use bg_a_ as fallback
+        val prefix = when (userProfile) {
+            "AM" -> "bg_a_"
+            "BM" -> "bg_b_"
+            else -> "bg_a_"
+        }
         val fields = R.drawable::class.java.fields
         // Only use the _orig.jpg files, not the XML files
         val drawables = fields.filter { 

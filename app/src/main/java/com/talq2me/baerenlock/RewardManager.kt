@@ -250,8 +250,8 @@ object RewardManager {
         RewardAppsManager.refreshRewardEligibleApps(context)
     }
 
-    fun saveRewardMinutes(context: Context) {
-        RewardStorage.saveRewardMinutes(context)
+    fun saveRewardMinutes(context: Context, updateLastUpdated: Boolean = true) {
+        RewardStorage.saveRewardMinutes(context, updateLastUpdated)
     }
 
     fun loadRewardMinutes(context: Context) {
@@ -399,6 +399,7 @@ object RewardManager {
         val now = System.currentTimeMillis()
         val oneMinuteInMillis = 60 * 1000L
         var shouldSave = false
+        var valueChanged = false // Track if value actually changed (for last_updated timestamp)
         
         // Initialize timer state if this is the first check
         if (rewardTimeStartTime == 0L) {
@@ -440,6 +441,7 @@ object RewardManager {
                     Log.d(TAG, "UsageStats: actualUsage=$actualUsageMinutes min, updating from $currentRewardMinutes to $newCurrentMinutes minutes")
                     currentRewardMinutes = newCurrentMinutes
                     shouldSave = true
+                    valueChanged = true // Value actually changed
                     lastUsageCheckTime = now
                     lastRewardDecrementTime = now
                     
@@ -457,6 +459,7 @@ object RewardManager {
                     val timeSinceLastSave = now - lastUsageCheckTime
                     if (timeSinceLastSave >= oneMinuteInMillis) {
                         shouldSave = true
+                        valueChanged = false // Periodic save, value didn't change
                         lastUsageCheckTime = now
                         // Only log periodic saves every 5 minutes to reduce log spam
                         if (now - lastPeriodicSaveLogTime >= 5 * oneMinuteInMillis) {
@@ -471,6 +474,7 @@ object RewardManager {
                 val timeSinceLastSave = now - lastUsageCheckTime
                 if (timeSinceLastSave >= oneMinuteInMillis) {
                     shouldSave = true
+                    valueChanged = false // Periodic save, value didn't change
                     lastUsageCheckTime = now
                 }
             }
@@ -485,9 +489,10 @@ object RewardManager {
             // Don't decrement without UsageStats permission since we can't determine foreground state accurately
         }
         
-        // Save to local storage and cloud if we need to
+        // Save to local storage if we need to
+        // Only update last_updated if value actually changed (for periodic saves, don't update timestamp)
         if (shouldSave) {
-            saveRewardMinutes(context)
+            saveRewardMinutes(context, updateLastUpdated = valueChanged)
         }
         
         // Check if reward time has expired
@@ -712,6 +717,7 @@ object RewardManager {
                     val now = System.currentTimeMillis()
                     val oneMinuteInMillis = 60 * 1000L
                     var shouldSave = false
+                    var valueChanged = false
                     
                     // Use UsageStatsManager to track actual usage time (only counts time when reward apps are in foreground)
                     // This is the correct approach since getActualRewardAppUsageMinutes already only counts foreground time
@@ -732,12 +738,14 @@ object RewardManager {
                                 Log.d(TAG, "UsageStats: actualUsage=$actualUsageMinutes min, updating from $currentRewardMinutes to $newCurrentMinutes minutes")
                                 currentRewardMinutes = newCurrentMinutes
                                 shouldSave = true
+                                valueChanged = true
                                 lastUsageCheckTime = now
                             } else {
                                 // Even if value hasn't changed, save periodically (every minute) as safety net
                                 val timeSinceLastSave = now - lastUsageCheckTime
                                 if (timeSinceLastSave >= oneMinuteInMillis) {
                                     shouldSave = true
+                                    valueChanged = false // Periodic save, value didn't change
                                     lastUsageCheckTime = now
                                     // Only log periodic saves every 5 minutes to reduce log spam
                                     if (now - lastPeriodicSaveLogTime >= 5 * oneMinuteInMillis) {
@@ -752,6 +760,7 @@ object RewardManager {
                             val timeSinceLastSave = now - lastUsageCheckTime
                             if (timeSinceLastSave >= oneMinuteInMillis) {
                                 shouldSave = true
+                                valueChanged = false // Periodic save, value didn't change
                                 lastUsageCheckTime = now
                             }
                         }
@@ -766,9 +775,10 @@ object RewardManager {
                         // Don't decrement without UsageStats permission since we can't determine foreground state accurately
                     }
                     
-                    // Save to local storage and cloud if we need to
+                    // Save to local storage if we need to
+                    // Only update last_updated if value actually changed (as per Daily Reset Logic spec)
                     if (shouldSave) {
-                        saveRewardMinutes(context)
+                        saveRewardMinutes(context, updateLastUpdated = valueChanged)
                     }
 
                     if (currentRewardMinutes == 0) {

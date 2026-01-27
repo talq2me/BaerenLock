@@ -84,6 +84,7 @@ object RewardTimer {
                     val now = System.currentTimeMillis()
                     val oneMinuteInMillis = 60 * 1000L
                     var shouldSave = false
+                    var valueChanged = false // Track if value actually changed (for last_updated timestamp)
                     
                     // BULLETPROOF APPROACH: Use elapsed time since timer started as PRIMARY mechanism
                     // This ensures we always decrement correctly even if foreground detection fails
@@ -114,12 +115,14 @@ object RewardTimer {
                                 RewardStorage.setCurrentRewardMinutes(currentRewardMinutes)
                                 callback?.onRewardMinutesUpdated(context, currentRewardMinutes)
                                 shouldSave = true
+                                valueChanged = true
                                 lastUsageCheckTime = now
                             } else {
                                 // Even if value hasn't changed, save periodically (every minute) as safety net
                                 val timeSinceLastSave = now - lastUsageCheckTime
                                 if (timeSinceLastSave >= oneMinuteInMillis) {
                                     shouldSave = true
+                                    valueChanged = false // Periodic save, value didn't change
                                     lastUsageCheckTime = now
                                     Log.d(TAG, "Periodic save (UsageStats): elapsed=${timeSinceStart/1000}s, current=$currentRewardMinutes minutes (unchanged but saving as safety)")
                                 }
@@ -133,12 +136,14 @@ object RewardTimer {
                                 RewardStorage.setCurrentRewardMinutes(currentRewardMinutes)
                                 callback?.onRewardMinutesUpdated(context, currentRewardMinutes)
                                 shouldSave = true
+                                valueChanged = true
                                 Log.d(TAG, "Early timer: elapsed=${timeSinceStart/1000}s, updating from $previousMinutes to $newCurrentMinutes minutes")
                             }
                             // Still do periodic save even if value unchanged
                             val timeSinceLastSave = now - lastUsageCheckTime
                             if (timeSinceLastSave >= oneMinuteInMillis) {
                                 shouldSave = true
+                                valueChanged = false // Periodic save, value didn't change
                                 lastUsageCheckTime = now
                                 Log.d(TAG, "Periodic save (early timer): elapsed=${timeSinceStart/1000}s, current=$currentRewardMinutes minutes")
                             }
@@ -159,6 +164,7 @@ object RewardTimer {
                             RewardStorage.setCurrentRewardMinutes(currentRewardMinutes)
                             callback?.onRewardMinutesUpdated(context, currentRewardMinutes)
                             shouldSave = true
+                            valueChanged = true
                             Log.d(TAG, "Timer-based: elapsed=${timeSinceStart/1000}s, elapsedMinutes=$elapsedMinutes, rewardAppActive=$isRewardAppActive, updating from $previousMinutes to $newCurrentMinutes minutes")
                         }
                         
@@ -166,14 +172,16 @@ object RewardTimer {
                         val timeSinceLastSave = now - lastRewardDecrementTime
                         if (timeSinceLastSave >= oneMinuteInMillis) {
                             shouldSave = true
+                            // Don't set valueChanged=true here - this is a periodic save, value didn't change
                             lastRewardDecrementTime = now
                             Log.d(TAG, "Periodic save (timer-based): elapsed=${timeSinceStart/1000}s, current=$currentRewardMinutes minutes (saving every minute as safety net)")
                         }
                     }
                     
-                    // Save to local storage and cloud if we need to
+                    // Save to local storage if we need to
+                    // Only update last_updated if value actually changed (as per Daily Reset Logic spec)
                     if (shouldSave) {
-                        RewardStorage.saveRewardMinutes(context)
+                        RewardStorage.saveRewardMinutes(context, updateLastUpdated = valueChanged)
                     }
 
                     if (currentRewardMinutes == 0) {

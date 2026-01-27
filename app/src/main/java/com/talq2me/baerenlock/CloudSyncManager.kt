@@ -69,7 +69,7 @@ object CloudSyncManager {
     /**
      * Gets Supabase URL from BuildConfig
      */
-    private fun getSupabaseUrl(context: Context): String {
+    fun getSupabaseUrl(context: Context): String {
         return try {
             BuildConfig.SUPABASE_URL.ifBlank { "" }
         } catch (e: Exception) {
@@ -81,7 +81,7 @@ object CloudSyncManager {
     /**
      * Gets Supabase API key from BuildConfig
      */
-    private fun getSupabaseKey(context: Context): String {
+    fun getSupabaseKey(context: Context): String {
         return try {
             BuildConfig.SUPABASE_KEY.ifBlank { "" }
         } catch (e: Exception) {
@@ -428,9 +428,9 @@ object CloudSyncManager {
 
     /**
      * Syncs current reward minutes to cloud user_data table
-     * CRITICAL: Checks cloud timestamp before updating - only updates if local is newer
+     * @param skipTimestampCheck If true, skips timestamp check (for use in updateCloudWithLocal where cloud_sync already determined local is newer)
      */
-    suspend fun syncRewardMinutesToCloud(context: Context, rewardMinutes: Int): Boolean = withContext(Dispatchers.IO) {
+    suspend fun syncRewardMinutesToCloud(context: Context, rewardMinutes: Int, skipTimestampCheck: Boolean = false): Boolean = withContext(Dispatchers.IO) {
         if (!isConfigured(context)) {
             Log.d(TAG, "Supabase not configured, skipping reward minutes sync")
             return@withContext false
@@ -440,39 +440,42 @@ object CloudSyncManager {
             // Get current profile (AM or BM format)
             val profile = ProfileManager.getCurrentProfile(context)
             
-            // CRITICAL: Check cloud timestamp first before updating
-            val url = "${getSupabaseUrl(context)}/rest/v1/user_data?profile=eq.$profile&select=banked_mins,last_updated"
-            val checkRequest = Request.Builder()
-                .url(url)
-                .get()
-                .addHeader("apikey", getSupabaseKey(context))
-                .addHeader("Authorization", "Bearer ${getSupabaseKey(context)}")
-                .build()
-            
-            val checkResponse = client.newCall(checkRequest).execute()
-            if (checkResponse.isSuccessful) {
-                val responseBody = checkResponse.body?.string() ?: "[]"
-                checkResponse.close()
+            // CRITICAL: Check cloud timestamp first before updating (unless skipTimestampCheck is true)
+            // When called from updateCloudWithLocal(), cloud_sync() already determined local is newer
+            if (!skipTimestampCheck) {
+                val url = "${getSupabaseUrl(context)}/rest/v1/user_data?profile=eq.$profile&select=banked_mins,last_updated"
+                val checkRequest = Request.Builder()
+                    .url(url)
+                    .get()
+                    .addHeader("apikey", getSupabaseKey(context))
+                    .addHeader("Authorization", "Bearer ${getSupabaseKey(context)}")
+                    .build()
                 
-                if (responseBody != "[]" && responseBody != "{}") {
-                    val dataList = gson.fromJson(responseBody, object : TypeToken<List<Map<String, Any>>>() {}.type) as? List<Map<String, Any>>
-                    val userData = dataList?.firstOrNull()
-                    val cloudTimestamp = userData?.get("last_updated") as? String
+                val checkResponse = client.newCall(checkRequest).execute()
+                if (checkResponse.isSuccessful) {
+                    val responseBody = checkResponse.body?.string() ?: "[]"
+                    checkResponse.close()
                     
-                    if (cloudTimestamp != null) {
-                        val rewardPrefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
-                        val localTimestamp = rewardPrefs.getString("banked_mins_timestamp", null)
+                    if (responseBody != "[]" && responseBody != "{}") {
+                        val dataList = gson.fromJson(responseBody, object : TypeToken<List<Map<String, Any>>>() {}.type) as? List<Map<String, Any>>
+                        val userData = dataList?.firstOrNull()
+                        val cloudTimestamp = userData?.get("last_updated") as? String
                         
-                        if (localTimestamp != null) {
-                            val cloudIsNewer = compareTimestamps(cloudTimestamp, localTimestamp) > 0
-                            Log.d(TAG, "syncRewardMinutesToCloud timestamp check: cloudIsNewer=$cloudIsNewer (cloud=$cloudTimestamp, local=$localTimestamp)")
-                            if (cloudIsNewer) {
-                                Log.d(TAG, "Cloud banked_mins timestamp is newer, not updating cloud")
-                                return@withContext true // Cloud is newer, don't overwrite
+                        if (cloudTimestamp != null) {
+                            val rewardPrefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
+                            val localTimestamp = rewardPrefs.getString("banked_mins_timestamp", null)
+                            
+                            if (localTimestamp != null) {
+                                val cloudIsNewer = compareTimestamps(cloudTimestamp, localTimestamp) > 0
+                                Log.d(TAG, "syncRewardMinutesToCloud timestamp check: cloudIsNewer=$cloudIsNewer (cloud=$cloudTimestamp, local=$localTimestamp)")
+                                if (cloudIsNewer) {
+                                    Log.d(TAG, "Cloud banked_mins timestamp is newer, not updating cloud")
+                                    return@withContext true // Cloud is newer, don't overwrite
+                                }
+                            } else {
+                                Log.d(TAG, "No local timestamp for banked_mins, not updating cloud")
+                                return@withContext true // No local timestamp, don't overwrite cloud
                             }
-                        } else {
-                            Log.d(TAG, "No local timestamp for banked_mins, not updating cloud")
-                            return@withContext true // No local timestamp, don't overwrite cloud
                         }
                     }
                 }
@@ -1313,28 +1316,49 @@ object CloudSyncManager {
     }
     
     /**
-     * Generates a timestamp in ISO 8601 format with EST timezone.
+     * Generates EST timestamp in database format (no offset).
+     * Format: yyyy-MM-dd HH:mm:ss.SSS (EST)
      */
     fun generateESTTimestamp(): String {
         val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
         val now = java.util.Date()
-        val offsetMillis = estTimeZone.getOffset(now.time)
-        val offsetHours = offsetMillis / (1000 * 60 * 60)
-        val offsetMinutes = Math.abs((offsetMillis % (1000 * 60 * 60)) / (1000 * 60))
-        val offsetString = String.format("%+03d:%02d", offsetHours, offsetMinutes)
-        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault())
+        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
         dateFormat.timeZone = estTimeZone
-        return dateFormat.format(now) + offsetString
+        return dateFormat.format(now)
     }
     
     /**
-     * Parses cloud timestamp (ISO 8601 format) to Date
+     * Parses timestamp to Date (EST), accepts DB format or ISO variants.
      */
     private fun parseCloudTimestamp(timestamp: String): Date {
         return try {
-            val isoFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.getDefault())
-            isoFormat.timeZone = java.util.TimeZone.getTimeZone("UTC")
-            isoFormat.parse(timestamp.substringBefore(".")) ?: Date()
+            var baseTimestamp = when {
+                timestamp.endsWith("Z") -> timestamp.substringBeforeLast('Z')
+                timestamp.matches(Regex(".*[+-]\\d{2}:\\d{2}$")) -> {
+                    val offsetStart = timestamp.lastIndexOfAny(charArrayOf('+', '-'))
+                    if (offsetStart > 10) timestamp.substring(0, offsetStart) else timestamp
+                }
+                else -> timestamp
+            }
+            baseTimestamp = baseTimestamp.replace('T', ' ')
+
+            val estZone = java.util.TimeZone.getTimeZone("America/New_York")
+            val formats = listOf(
+                "yyyy-MM-dd HH:mm:ss.SSS",
+                "yyyy-MM-dd HH:mm:ss.SS",
+                "yyyy-MM-dd HH:mm:ss"
+            )
+            for (pattern in formats) {
+                try {
+                    val df = java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault())
+                    df.timeZone = estZone
+                    val parsed = df.parse(baseTimestamp)
+                    if (parsed != null) return parsed
+                } catch (_: Exception) {
+                    // try next
+                }
+            }
+            Date()
         } catch (e: Exception) {
             Log.w(TAG, "Error parsing timestamp: $timestamp", e)
             Date()
@@ -1354,43 +1378,41 @@ object CloudSyncManager {
     }
     
     /**
-     * Parses timestamp string to milliseconds for comparison
-     * Handles both ISO 8601 format (from Supabase) and our EST format
+     * Parses timestamp string to milliseconds for comparison (EST, DB format).
      */
     fun parseTimestampForComparison(timestamp: String): Long {
         return try {
-            // All timestamps are stored in EST, regardless of the offset suffix
-            // Strip any offset or Z suffix and parse the base time as EST
-            val baseTimestamp = when {
-                timestamp.endsWith("Z") -> timestamp.substring(0, timestamp.length - 1)
+            var baseTimestamp = when {
+                timestamp.endsWith("Z") -> timestamp.substringBeforeLast('Z')
                 timestamp.matches(Regex(".*[+-]\\d{2}:\\d{2}$")) -> {
-                    val timePartEnd = timestamp.indexOf('.')
-                    val timeEndIndex = if (timePartEnd > 0) {
-                        val millisEnd = timestamp.indexOfAny(charArrayOf('+', '-'), timePartEnd)
-                        if (millisEnd > 0) millisEnd else timestamp.length
-                    } else {
-                        val secondsColon = timestamp.lastIndexOf(':')
-                        if (secondsColon > 0) {
-                            val offsetStart = timestamp.indexOfAny(charArrayOf('+', '-'), secondsColon)
-                            if (offsetStart > 0) offsetStart else timestamp.length
-                        } else {
-                            timestamp.length
-                        }
-                    }
-                    timestamp.substring(0, timeEndIndex)
+                    val offsetStart = timestamp.lastIndexOfAny(charArrayOf('+', '-'))
+                    if (offsetStart > 10) timestamp.substring(0, offsetStart) else timestamp
                 }
                 else -> timestamp
             }
-            
-            // Parse the base time as EST (America/New_York timezone)
-            val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault()).apply {
-                timeZone = java.util.TimeZone.getTimeZone("America/New_York")
+            baseTimestamp = baseTimestamp.replace('T', ' ')
+
+            val estZone = java.util.TimeZone.getTimeZone("America/New_York")
+            val formats = listOf(
+                "yyyy-MM-dd HH:mm:ss.SSS",
+                "yyyy-MM-dd HH:mm:ss.SS",
+                "yyyy-MM-dd HH:mm:ss"
+            )
+            for (pattern in formats) {
+                try {
+                    val df = java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault())
+                    df.timeZone = estZone
+                    val parsed = df.parse(baseTimestamp)
+                    if (parsed != null) {
+                        val result = parsed.time
+                        Log.d(TAG, "parseTimestampForComparison: $timestamp -> base=$baseTimestamp -> $result (parsed as EST)")
+                        return result
+                    }
+                } catch (_: Exception) {
+                    // try next
+                }
             }
-            
-            val date = dateFormat.parse(baseTimestamp)
-            val result = date?.time ?: 0L
-            Log.d(TAG, "parseTimestampForComparison: $timestamp -> base=$baseTimestamp -> $result (parsed as EST)")
-            return result
+            0L
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing timestamp for comparison: $timestamp", e)
             0L
