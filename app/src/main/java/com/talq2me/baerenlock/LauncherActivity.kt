@@ -246,9 +246,17 @@ class LauncherActivity : AppCompatActivity() {
         // Start periodic health checks (every 5 minutes)
         startPeriodicHealthChecks()
         
-        // CRITICAL: Check if reset is needed FIRST, before any syncing
-        Log.d(TAG, "Checking if daily reset is needed before syncing (onResume)")
-        SettingsManager.checkAndTriggerResetIfNeeded(this)
+        // CRITICAL: Run reset-if-needed (local first) then download, then refresh reward UI in callback.
+        // This ensures local banked_mins are cleared before any sync, so we never push stale values to cloud.
+        Log.d(TAG, "Running reset-then-download before syncing (onResume)")
+        SettingsManager.runResetThenDownload(this) {
+            RewardManager.loadRewardMinutes(this@LauncherActivity)
+            if (RewardManager.currentRewardMinutes > 0) {
+                RewardManager.startRewardTimer(this@LauncherActivity)
+            }
+            updateRewardMinutesDisplay()
+            refreshIcons(appGrid)
+        }
         
         // CRITICAL: Check for profile changes from cloud BEFORE refreshing UI
         // This ensures the UI displays the correct profile after sync
@@ -258,26 +266,12 @@ class LauncherActivity : AppCompatActivity() {
         refreshBackgroundImage()
         
         // Banner will be updated by performHealthCheck() which calls updateHealthBanner()
-
-        // Download user_data from cloud for current profile (to get accurate reward minutes)
-        // This happens after reset check, so we download the reset data if reset was triggered
-        SettingsManager.downloadUserDataFromCloud(this)
         
         // Update cloud toggle state
         updateCloudToggleState()
-        
-        // CRITICAL: Load reward minutes BEFORE refreshing icons
-        // This ensures the launcher shows reward apps when banked_mins > 0
-        RewardManager.loadRewardMinutes(this)
-        if (RewardManager.currentRewardMinutes > 0) {
-            RewardManager.startRewardTimer(this)
-        }
 
         // Check for reward minutes from intent (in case we missed it in onCreate/onNewIntent)
         processIncomingRewardMinutes(intent)
-
-        // Refresh icons AFTER loading reward minutes to ensure reward apps show when banked_mins > 0
-        refreshIcons(appGrid)
 
         startRewardDisplayUpdate()
 

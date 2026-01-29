@@ -575,7 +575,10 @@ object SettingsManager {
                 val profile = ProfileManager.getCurrentProfile(context)
                 val needsReset = CloudSyncManager.checkIfResetNeeded(context, profile)
                 if (needsReset) {
-                    Log.d(TAG, "Reset needed for profile: $profile, triggering cloud reset")
+                    Log.d(TAG, "Reset needed for profile: $profile, performing local reset first then cloud reset")
+                    // CRITICAL: Clear local banked_mins (and set last_reset/last_updated) before triggering cloud reset.
+                    // Otherwise a later downloadUserDataFromCloud can see "local newer" and push stale banked_mins to cloud.
+                    DailyResetAndSyncManager.performLocalResetOnly(context, profile)
                     val success = CloudSyncManager.triggerCloudReset(context, profile)
                     if (success) {
                         Log.d(TAG, "Successfully triggered cloud reset for profile: $profile")
@@ -598,6 +601,36 @@ object SettingsManager {
      */
     fun downloadUserDataFromCloud(context: Context) {
         CloudSyncManager.downloadUserDataFromCloudAsync(context)
+    }
+    
+    /**
+     * Runs reset-if-needed (with local reset first) then download, then invokes onComplete on the main thread.
+     * Use this on LauncherActivity onResume so download runs only after any reset has cleared local banked_mins,
+     * preventing stale local values from being pushed to the cloud.
+     */
+    fun runResetThenDownload(context: Context, onComplete: (() -> Unit)? = null) {
+        settingsScope.launch {
+            try {
+                val profile = ProfileManager.getCurrentProfile(context)
+                val needsReset = CloudSyncManager.checkIfResetNeeded(context, profile)
+                if (needsReset) {
+                    Log.d(TAG, "Reset needed for profile: $profile, performing local reset first then cloud reset")
+                    DailyResetAndSyncManager.performLocalResetOnly(context, profile)
+                    CloudSyncManager.triggerCloudReset(context, profile)
+                }
+                CloudSyncManager.downloadUserDataFromCloud(context, profile, isRetry = false)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in runResetThenDownload: ${e.message}", e)
+            } finally {
+                onComplete?.let { cb ->
+                    try {
+                        withContext(Dispatchers.Main) { cb() }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error in runResetThenDownload onComplete: ${e.message}", e)
+                    }
+                }
+            }
+        }
     }
 
     /**

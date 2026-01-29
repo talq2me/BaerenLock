@@ -127,6 +127,15 @@ object DailyResetAndSyncManager {
     }
     
     /**
+     * Performs local reset only (clears banked_mins, sets last_reset/last_updated).
+     * Call this when a cloud reset is about to be triggered so local state is cleared first,
+     * preventing a later banked_mins sync from pushing stale values to the cloud.
+     */
+    suspend fun performLocalResetOnly(context: Context, profile: String) {
+        resetLocal(context, profile)
+    }
+    
+    /**
      * Cloud sync according to requirements:
      * - Compare local.profile.last_updated with cloud.profile.last_updated
      * - If equal or cloud not found -> do nothing
