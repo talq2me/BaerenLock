@@ -4,6 +4,9 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import com.google.gson.Gson
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import com.talq2me.baerenlock.BuildConfig
 import kotlinx.coroutines.Dispatchers
@@ -273,6 +276,46 @@ object DailyResetAndSyncManager {
             val localLastUpdated = getLocalLastUpdatedTimestamp(context, profile)
             val bankedMinutes = RewardStorage.getCurrentRewardMinutes()
             
+            // Fetch current chores from cloud so we can set done=false (do not reset coins_earned)
+            val baseUrl = "${CloudSyncManager.getSupabaseUrl(context)}/rest/v1/user_data"
+            val client = okhttp3.OkHttpClient()
+            val supabaseKey = CloudSyncManager.getSupabaseKey(context)
+            val getUrl = "$baseUrl?profile=eq.$profile&select=chores"
+            val getRequest = okhttp3.Request.Builder()
+                .url(getUrl)
+                .get()
+                .addHeader("apikey", supabaseKey)
+                .addHeader("Authorization", "Bearer $supabaseKey")
+                .build()
+            var resetChores: JsonArray? = null
+            try {
+                val getResponse = client.newCall(getRequest).execute()
+                if (getResponse.isSuccessful) {
+                    val body = getResponse.body?.string() ?: "[]"
+                    getResponse.close()
+                    val parsed = JsonParser.parseString(if (body.startsWith("[")) body else "[]")
+                    if (parsed.isJsonArray && parsed.asJsonArray.size() > 0) {
+                        val row = parsed.asJsonArray.get(0)
+                        if (row.isJsonObject && row.asJsonObject.has("chores")) {
+                            val choresEl = row.asJsonObject.get("chores")
+                            if (choresEl.isJsonArray) {
+                                val arr = choresEl.asJsonArray
+                                resetChores = JsonArray()
+                                arr.forEach { el ->
+                                    if (el.isJsonObject) {
+                                        val obj = el.asJsonObject.deepCopy()
+                                        obj.addProperty("done", false)
+                                        resetChores!!.add(obj)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not fetch chores for reset, skipping chores reset in cloud: ${e.message}")
+            }
+
             // Build update map with all reset values
             // CRITICAL: Set required_tasks, practice_tasks, checklist_items to null as per spec
             val updateMap = mutableMapOf<String, Any?>(
@@ -280,11 +323,14 @@ object DailyResetAndSyncManager {
                 "last_updated" to localLastUpdated,
                 "berries_earned" to 0,
                 "banked_mins" to bankedMinutes,
-                "required_tasks" to null,  // Set to null as per spec
-                "practice_tasks" to null,   // Set to null as per spec
-                "checklist_items" to null   // Set to null as per spec
+                "required_tasks" to null,
+                "practice_tasks" to null,
+                "checklist_items" to null
             )
-            
+            if (resetChores != null) {
+                updateMap["chores"] = resetChores
+            }
+
             // Also sync app lists, settings, and active profile
             try {
                 CloudSyncManager.syncAppListsToCloud(context)
@@ -318,12 +364,9 @@ object DailyResetAndSyncManager {
             // Upload reset values to user_data table
             val gson = Gson()
             val json = gson.toJson(updateMap)
-            val baseUrl = "${CloudSyncManager.getSupabaseUrl(context)}/rest/v1/user_data"
             val requestBody = json.toRequestBody("application/json".toMediaType())
-            
+
             val updateUrl = "$baseUrl?profile=eq.$profile"
-            val client = okhttp3.OkHttpClient()
-            val supabaseKey = CloudSyncManager.getSupabaseKey(context)
             val patchRequest = okhttp3.Request.Builder()
                 .url(updateUrl)
                 .patch(requestBody)
