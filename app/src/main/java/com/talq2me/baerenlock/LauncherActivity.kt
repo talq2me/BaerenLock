@@ -603,9 +603,12 @@ class LauncherActivity : AppCompatActivity() {
         // Store health check result for reporting
         storeHealthCheckResult(result)
         
-        // Sync health check to cloud
-        val healthStatus = if (result.isHealthy()) "healthy" else "unhealthy"
-        val healthIssues = if (result.hasIssues()) result.getIssueDescription() else null
+        // Sync health check to cloud using the same result as the banner (baseResult).
+        // This keeps the parent report in sync with what the user sees on the tablet:
+        // only report unhealthy when the banner would show unhealthy (real permission issues),
+        // not when we've downgraded locally due to "service not receiving events" (e.g. device idle).
+        val healthStatus = if (baseResult.isHealthy()) "healthy" else "unhealthy"
+        val healthIssues = if (baseResult.hasIssues()) baseResult.getIssueDescription() else null
         SettingsManager.syncHealthCheckToCloudAsync(this, healthStatus, healthIssues)
         
         // Also ensure device record exists (in case it wasn't created during startup)
