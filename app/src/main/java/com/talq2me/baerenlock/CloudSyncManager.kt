@@ -706,103 +706,18 @@ object CloudSyncManager {
                     val userData = dataList?.firstOrNull()
                     
                     if (userData != null) {
-                        // Note: Reset check should be done BEFORE calling this function using checkIfResetNeeded()
-                        // This function just downloads and applies the data
-                        
-                        // If this is a retry after reset, the reset has already been triggered
+                        // ONLINE-ONLY: Cloud is single source of truth. No local persistence of banked_mins.
                         if (isRetry && !resetTriggeredProfiles.contains(cloudProfile)) {
                             Log.w(TAG, "Retry called but reset not triggered, this shouldn't happen")
                         }
                         
-                        val today = Calendar.getInstance().apply {
-                            set(Calendar.HOUR_OF_DAY, 0)
-                            set(Calendar.MINUTE, 0)
-                            set(Calendar.SECOND, 0)
-                            set(Calendar.MILLISECOND, 0)
-                        }
-                        val todayMillis = today.timeInMillis
-                        
-                        // TIMESTAMP-BASED SYNC: Compare local banked_mins timestamp vs cloud last_updated timestamp
-                        val rewardPrefs = context.getSharedPreferences("reward_prefs", Context.MODE_PRIVATE)
-                        val currentLocalBankedMins = rewardPrefs.getInt("current_reward_minutes", 0)
-                        val localBankedMinsTimestamp = rewardPrefs.getString("banked_mins_timestamp", null)
                         val cloudBankedMins = (userData["banked_mins"] as? Number)?.toInt() ?: 0
-                        val cloudTimestamp = userData["last_updated"] as? String
+                        RewardStorage.setCurrentRewardMinutes(cloudBankedMins)
+                        RewardManager.currentRewardMinutes = cloudBankedMins
+                        Log.d(TAG, "Applied banked_mins from cloud to in-memory: $cloudBankedMins for profile: $cloudProfile (online-only, no local persistence)")
                         
-                        var bankedMinsToApply: Int
-                        var shouldSyncLocalToCloud: Boolean
-                        
-                        if (localBankedMinsTimestamp.isNullOrEmpty() && currentLocalBankedMins == 0) {
-                            // Fresh install - default to 0
-                            bankedMinsToApply = 0
-                            shouldSyncLocalToCloud = true
-                            Log.d(TAG, "Fresh install detected - setting banked_mins to 0 (cloud had $cloudBankedMins, but ignoring on fresh install)")
-                        } else if (cloudTimestamp.isNullOrEmpty()) {
-                            bankedMinsToApply = currentLocalBankedMins
-                            shouldSyncLocalToCloud = true
-                            Log.d(TAG, "Keeping local banked_mins ($currentLocalBankedMins) - cloud has no timestamp")
-                        } else {
-                            // Both have timestamps - compare and use the newer one
-                            try {
-                                val localTime = if (!localBankedMinsTimestamp.isNullOrEmpty()) {
-                                    parseTimestampForComparison(localBankedMinsTimestamp)
-                                } else {
-                                    0L
-                                }
-                                val cloudTime = parseTimestampForComparison(cloudTimestamp)
-                                
-                                Log.d(TAG, "Comparing timestamps - local: $localBankedMinsTimestamp ($localTime), cloud: $cloudTimestamp ($cloudTime)")
-                                
-                                if (cloudTime > localTime) {
-                                    bankedMinsToApply = cloudBankedMins
-                                    shouldSyncLocalToCloud = false
-                                    Log.d(TAG, "Applying cloud banked_mins ($cloudBankedMins) - cloud timestamp is newer")
-                                } else {
-                                    bankedMinsToApply = currentLocalBankedMins
-                                    shouldSyncLocalToCloud = true
-                                    Log.d(TAG, "Keeping local banked_mins ($currentLocalBankedMins) - local timestamp is newer or equal")
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error comparing timestamps for banked_mins, keeping local value", e)
-                                bankedMinsToApply = currentLocalBankedMins
-                                shouldSyncLocalToCloud = true
-                            }
-                        }
-                        
-                        // Update local reward minutes with the chosen value
-                        val editor = rewardPrefs.edit()
-                        editor.putInt("current_reward_minutes", bankedMinsToApply)
-                        editor.putLong("last_reward_date", todayMillis)
-                        
-                        if (!shouldSyncLocalToCloud && !cloudTimestamp.isNullOrEmpty()) {
-                            editor.putString("banked_mins_timestamp", cloudTimestamp)
-                            Log.d(TAG, "Updated local banked_mins timestamp to match cloud: $cloudTimestamp")
-                        } else if (shouldSyncLocalToCloud && localBankedMinsTimestamp.isNullOrEmpty()) {
-                            val estTimestamp = generateESTTimestamp()
-                            editor.putString("banked_mins_timestamp", estTimestamp)
-                            Log.d(TAG, "Set initial banked_mins_timestamp in EST ($estTimestamp)")
-                        }
-                        editor.apply()
-                        
-                        // Also update RewardManager's current value
-                        // Note: currentRewardMinutes is a property (not a field), so we call the setter directly
-                        RewardManager.currentRewardMinutes = bankedMinsToApply
-                        Log.d(TAG, "Updated RewardManager.currentRewardMinutes to $bankedMinsToApply")
-                        
-                        // If we kept local value and it differs from cloud, sync local to cloud
-                        if (shouldSyncLocalToCloud && bankedMinsToApply != cloudBankedMins) {
-                            Log.d(TAG, "Local banked_mins ($bankedMinsToApply) differs from cloud ($cloudBankedMins), syncing local to cloud")
-                            CoroutineScope(Dispatchers.IO).launch {
-                                try {
-                                    syncRewardMinutesToCloud(context, bankedMinsToApply)
-                                    Log.d(TAG, "Synced local banked_mins ($bankedMinsToApply) to cloud")
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error syncing local banked_mins to cloud", e)
-                                }
-                            }
-                        }
-                        
-                        Log.d(TAG, "Downloaded and applied banked_mins from cloud: $bankedMinsToApply (cloud: $cloudBankedMins, local was: $currentLocalBankedMins) for profile: $cloudProfile")
+                        // Apply app lists from cloud to local prefs (cache overwritten by cloud; no local source of truth)
+                        applyAppListsFromUserData(context, userData)
                         
                         // Send broadcast to update UI
                         val intent = Intent("com.talq2me.baerenlock.ACTION_REWARD_TIME_UPDATED")
@@ -825,6 +740,49 @@ object CloudSyncManager {
             return@withContext false
         } finally {
             downloadingProfiles.remove(cloudProfile)
+        }
+    }
+
+    /**
+     * Applies app lists from user_data (reward_apps, blacklisted_apps, white_listed_apps) to local prefs.
+     * ONLINE-ONLY: prefs are cache only, overwritten by cloud; cloud is source of truth.
+     */
+    private fun applyAppListsFromUserData(context: Context, userData: Map<String, Any>) {
+        try {
+            val rewardApps = parseJsonArrayToSet(userData["reward_apps"])
+            val blacklisted = parseJsonArrayToSet(userData["blacklisted_apps"])
+            val whiteListed = parseJsonArrayToSet(userData["white_listed_apps"])
+            if (rewardApps != null) {
+                val settingsPrefs = context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
+                settingsPrefs.edit().putStringSet("reward_apps", rewardApps).apply()
+                Log.d(TAG, "Applied reward_apps from cloud: ${rewardApps.size} apps")
+            }
+            if (blacklisted != null) {
+                val prefs = context.getSharedPreferences("blacklist_prefs", Context.MODE_PRIVATE)
+                prefs.edit().putStringSet("packages", blacklisted).apply()
+                Log.d(TAG, "Applied blacklisted_apps from cloud: ${blacklisted.size} apps")
+            }
+            if (whiteListed != null) {
+                val prefs = context.getSharedPreferences("whitelist_prefs", Context.MODE_PRIVATE)
+                prefs.edit().putStringSet("allowed", whiteListed).apply()
+                Log.d(TAG, "Applied white_listed_apps from cloud: ${whiteListed.size} apps")
+            }
+            RewardAppsManager.loadAllowedApps(context)
+            RewardAppsManager.loadRewardEligibleApps(context)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error applying app lists from user_data", e)
+        }
+    }
+
+    private fun parseJsonArrayToSet(value: Any?): Set<String>? {
+        if (value == null) return null
+        return when (value) {
+            is String -> try {
+                val list = gson.fromJson(value, object : TypeToken<List<String>>() {}.type) as? List<String>
+                list?.toSet()
+            } catch (_: Exception) { null }
+            is List<*> -> value.mapNotNull { it?.toString() }.toSet()
+            else -> null
         }
     }
 
@@ -1433,12 +1391,13 @@ object CloudSyncManager {
     }
     
     /**
-     * Async wrapper for syncRewardMinutesToCloud
+     * Async wrapper for syncRewardMinutesToCloud.
+     * @param skipTimestampCheck When true (online-only mode), always push to cloud without comparing timestamps.
      */
-    fun syncRewardMinutesToCloudAsync(context: Context, rewardMinutes: Int) {
+    fun syncRewardMinutesToCloudAsync(context: Context, rewardMinutes: Int, skipTimestampCheck: Boolean = false) {
         syncScope.launch {
             try {
-                syncRewardMinutesToCloud(context, rewardMinutes)
+                syncRewardMinutesToCloud(context, rewardMinutes, skipTimestampCheck)
             } catch (e: Exception) {
                 Log.w(TAG, "Could not sync reward minutes to cloud: ${e.message}")
             }

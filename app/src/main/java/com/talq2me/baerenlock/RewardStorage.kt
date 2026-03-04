@@ -3,189 +3,83 @@ package com.talq2me.baerenlock
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
-import java.util.Calendar
 
 /**
- * Manages storage and persistence of reward minutes.
- * Handles saving/loading reward minutes, transaction processing, and daily resets.
+ * Manages reward minutes for ONLINE-ONLY mode.
+ * No local persistence of reward minutes - cloud (Supabase user_data.banked_mins) is the single source of truth.
+ * In-memory cache only; callers must fetch from cloud on load and push to cloud on change.
  */
 object RewardStorage {
     private const val TAG = "RewardStorage"
     private const val PREFS_NAME = "reward_prefs"
-    private const val KEY_CURRENT_REWARD_MINUTES = "current_reward_minutes"
-    private const val KEY_LAST_REWARD_DATE = "last_reward_date"
-    private const val KEY_BANKED_MINS_TIMESTAMP = "banked_mins_timestamp"
     private const val KEY_PROCESSED_TRANSACTION_IDS = "processed_transaction_ids"
     
-    // In-memory cache of current reward minutes
+    // In-memory cache only (no persistence). Populated from cloud fetch; pushed to cloud on change.
     @Volatile
     private var currentRewardMinutes: Int = 0
     
     /**
-     * Gets the current reward minutes from memory
+     * Gets the current reward minutes from memory (populated by cloud fetch).
      */
     fun getCurrentRewardMinutes(): Int {
         return currentRewardMinutes
     }
     
     /**
-     * Gets the current reward minutes directly from SharedPreferences.
-     * Use this when you need to ensure you're reading the latest persisted value,
-     * bypassing the in-memory cache (useful for avoiding race conditions).
+     * Gets the current reward minutes. In online-only mode this is the same as getCurrentRewardMinutes()
+     * (no separate storage read).
      */
     fun getCurrentRewardMinutesFromStorage(context: Context): Int {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getInt(KEY_CURRENT_REWARD_MINUTES, 0)
+        return currentRewardMinutes
     }
     
     /**
-     * Sets the current reward minutes in memory (does not persist)
+     * Sets the current reward minutes in memory (does not persist).
+     * Caller must push to cloud via saveRewardMinutesToCloud() when value changes.
      */
     fun setCurrentRewardMinutes(minutes: Int) {
         currentRewardMinutes = minutes
     }
 
     /**
-     * Resets reward minutes locally without triggering a cloud sync.
+     * Resets reward minutes in memory to 0. Caller must push reset to cloud (e.g. via daily reset flow).
      */
     fun resetRewardMinutesLocal(context: Context) {
         currentRewardMinutes = 0
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val editor = prefs.edit()
-
-        editor.putInt(KEY_CURRENT_REWARD_MINUTES, 0)
-        val today = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
-        editor.putLong(KEY_LAST_REWARD_DATE, today)
-
-        val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
-        val now = java.util.Date()
-        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
-        dateFormat.timeZone = estTimeZone
-        val timestamp = dateFormat.format(now)
-        editor.putString(KEY_BANKED_MINS_TIMESTAMP, timestamp)
-
-        editor.apply()
-        Log.d(TAG, "Reset reward minutes locally to 0, date: $today, timestamp: $timestamp")
+        Log.d(TAG, "Reset reward minutes in memory to 0 (online-only: no local persistence)")
     }
     
     /**
-     * Saves reward minutes to local storage.
-     * Only updates last_updated timestamp if the value actually changed (as per Daily Reset Logic spec).
-     * 
-     * @param updateLastUpdated If true, update last_updated timestamp (should be true only when value changed)
+     * Pushes current reward minutes to cloud only. No local persistence.
+     * Use when value has changed (timer decrement, add minutes, reset).
      */
     fun saveRewardMinutes(context: Context, updateLastUpdated: Boolean = true) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        
-        // Check if value actually changed
-        val previousValue = prefs.getInt(KEY_CURRENT_REWARD_MINUTES, -1)
-        val valueChanged = previousValue != currentRewardMinutes
-        
-        val editor = prefs.edit()
-        editor.putInt(KEY_CURRENT_REWARD_MINUTES, currentRewardMinutes)
-        // Save today's date to track daily reset
-        val today = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
-        editor.putLong(KEY_LAST_REWARD_DATE, today)
-        
-        // Generate and store timestamp for banked_mins (EST DB format, no offset)
-        val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
-        val now = java.util.Date()
-        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
-        dateFormat.timeZone = estTimeZone
-        val timestamp = dateFormat.format(now)
-        editor.putString(KEY_BANKED_MINS_TIMESTAMP, timestamp)
-        
-        editor.apply()
-        Log.d(TAG, "Saved reward minutes to SharedPreferences: $currentRewardMinutes (was: $previousValue, changed: $valueChanged), date: $today, timestamp: $timestamp")
-        
-        // Update last_updated timestamp ONLY if value changed (as per Daily Reset Logic spec)
-        // Note: Do NOT call update_cloud_with_local() directly - the main screen load triggers cloud_sync() automatically
-        if (updateLastUpdated && valueChanged) {
-            val profile = ProfileManager.getCurrentProfile(context)
-            updateLastUpdatedTimestamp(context, profile)
-            Log.d(TAG, "Updated last_updated timestamp because reward minutes changed: $previousValue -> $currentRewardMinutes")
-        } else if (updateLastUpdated && !valueChanged) {
-            Log.d(TAG, "Skipped updating last_updated timestamp - reward minutes unchanged ($currentRewardMinutes)")
-        }
+        Log.d(TAG, "Saving reward minutes to cloud only: $currentRewardMinutes (online-only)")
+        CloudSyncManager.syncRewardMinutesToCloudAsync(context, currentRewardMinutes, skipTimestampCheck = true)
     }
     
     /**
-     * Updates last_updated timestamp in settings prefs to trigger cloud sync
-     * This is called whenever settings that should sync to cloud are changed (as per Daily Reset Logic)
-     */
-    private fun updateLastUpdatedTimestamp(context: Context, profile: String) {
-        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-        val timestamp = CloudSyncManager.generateESTTimestamp()
-        val key = "${profile}_last_updated_timestamp"
-        prefs.edit().putString(key, timestamp).apply()
-        Log.d(TAG, "Updated last_updated timestamp for profile $profile: $timestamp")
-    }
-    
-    /**
-     * Syncs current reward minutes to cloud user_data table
-     * This ensures that if we sync from cloud, we get the accurate remaining reward time
-     */
-    private fun syncRewardMinutesToCloud(context: Context) {
-        Log.d(TAG, "Syncing $currentRewardMinutes reward minutes to cloud...")
-        // Use CloudSyncManager to sync asynchronously
-        CloudSyncManager.syncRewardMinutesToCloudAsync(context, currentRewardMinutes)
-    }
-
-    /**
-     * Loads reward minutes from local storage.
-     * Resets to 0 if it's a new day.
-     * Returns true if reward minutes were loaded (not reset).
+     * No-op in online-only mode. Reward minutes are loaded by fetching user_data from cloud
+     * (e.g. DailyResetAndSyncManager / downloadUserDataFromCloud). Returns false so callers know
+     * no local load occurred.
      */
     fun loadRewardMinutes(context: Context): Boolean {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        
-        // Check if we need to reset for a new day
-        val today = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
-        
-        val lastRewardDate = prefs.getLong(KEY_LAST_REWARD_DATE, 0L)
-        
-        // Reset to 0 if it's a new day (including first time load when lastRewardDate is 0L)
-        if (lastRewardDate != today) {
-            // It's a new day - reset reward minutes to 0
-            Log.d(TAG, "New day detected (last: $lastRewardDate, today: $today). Resetting reward minutes to 0.")
-            currentRewardMinutes = 0
-            saveRewardMinutes(context) // This will also update the date
-            return false
-        } else {
-            // Same day - load the saved minutes
-            currentRewardMinutes = prefs.getInt(KEY_CURRENT_REWARD_MINUTES, 0)
-            Log.d(TAG, "Loaded reward minutes from SharedPreferences: $currentRewardMinutes (same day)")
-            return true
-        }
+        Log.d(TAG, "loadRewardMinutes: no-op in online-only mode (use cloud fetch)")
+        return false
     }
     
     /**
-     * Adds reward minutes to the current total
+     * Adds reward minutes to the current total and pushes to cloud.
      */
     fun addRewardMinutes(context: Context, minutes: Int) {
         currentRewardMinutes += minutes
         saveRewardMinutes(context)
-        Log.d(TAG, "Added $minutes reward minutes. New total: $currentRewardMinutes")
+        Log.d(TAG, "Added $minutes reward minutes. New total: $currentRewardMinutes (pushed to cloud)")
     }
     
     /**
-     * Checks if a transaction ID has already been processed.
-     * This prevents double-counting when both Intent and Broadcast are received.
+     * Checks if a transaction ID has already been processed (dedup for Intent + Broadcast).
+     * Stored in prefs as operational state only, not synced content.
      */
     fun isTransactionProcessed(context: Context, transactionId: Long): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -194,46 +88,20 @@ object RewardStorage {
     }
 
     /**
-     * Marks a transaction ID as processed to prevent double-counting.
-     * Also cleans up old transaction IDs (older than 24 hours) to prevent unbounded growth.
+     * Marks a transaction ID as processed. Cleans up IDs older than 24 hours.
      */
     fun markTransactionProcessed(context: Context, transactionId: Long) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val processedIds = mutableSetOf<String>()
         processedIds.addAll(prefs.getStringSet(KEY_PROCESSED_TRANSACTION_IDS, mutableSetOf()) ?: mutableSetOf())
-        
-        // Add the new transaction ID
         processedIds.add(transactionId.toString())
-        
-        // Clean up old transaction IDs (older than 24 hours)
         val currentTime = System.currentTimeMillis()
         val oneDayInMillis = 24 * 60 * 60 * 1000L
         val cleanedIds = processedIds.filter { id ->
             val idTime = id.toLongOrNull() ?: 0L
             currentTime - idTime < oneDayInMillis
         }.toSet()
-        
-        prefs.edit()
-            .putStringSet(KEY_PROCESSED_TRANSACTION_IDS, cleanedIds)
-            .apply()
-        
+        prefs.edit().putStringSet(KEY_PROCESSED_TRANSACTION_IDS, cleanedIds).apply()
         Log.d(TAG, "Marked transaction ID $transactionId as processed. Total tracked: ${cleanedIds.size}")
-    }
-    
-    /**
-     * Gets the timestamp for banked_mins (for cloud sync comparison)
-     */
-    fun getBankedMinsTimestamp(context: Context): String? {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getString(KEY_BANKED_MINS_TIMESTAMP, null)
-    }
-    
-    /**
-     * Sets the timestamp for banked_mins (used when applying cloud value)
-     */
-    fun setBankedMinsTimestamp(context: Context, timestamp: String) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().putString(KEY_BANKED_MINS_TIMESTAMP, timestamp).apply()
-        Log.d(TAG, "Updated banked_mins timestamp: $timestamp")
     }
 }

@@ -145,41 +145,18 @@ object DailyResetAndSyncManager {
      * - If local is newer -> call update_cloud_with_local()
      * - If cloud is newer -> call update_local_with_cloud()
      */
+    /**
+     * ONLINE-ONLY: Always fetch from cloud and apply. No local/cloud timestamp merge.
+     * Pushes to cloud happen when user/timer changes something (saveRewardMinutes, syncAppListsToCloud, etc.).
+     */
     private suspend fun cloudSync(context: Context, profile: String) = withContext(Dispatchers.IO) {
-        Log.d(TAG, "cloud_sync() started for profile: $profile")
+        Log.d(TAG, "cloud_sync() started for profile: $profile (online-only: always fetch from cloud)")
         
         if (!CloudSyncManager.isConfigured(context)) {
             Log.d(TAG, "Cloud storage not configured, skipping cloud_sync()")
             return@withContext
         }
-        
-        val localLastUpdated = getLocalLastUpdatedTimestamp(context, profile)
-        val cloudLastUpdated = getCloudLastUpdated(context, profile)
-        
-        if (cloudLastUpdated == null) {
-            Log.d(TAG, "Cloud last_updated not found, doing nothing")
-            return@withContext
-        }
-        
-        // Compare timestamps (both in EST)
-        val comparison = compareTimestamps(localLastUpdated, cloudLastUpdated)
-        
-        when {
-            comparison == 0 -> {
-                // Timestamps are equal
-                Log.d(TAG, "Local and cloud timestamps are equal, doing nothing")
-            }
-            comparison > 0 -> {
-                // Local is newer
-                Log.d(TAG, "Local is newer ($localLastUpdated > $cloudLastUpdated), calling update_cloud_with_local()")
-                updateCloudWithLocal(context, profile)
-            }
-            else -> {
-                // Cloud is newer
-                Log.d(TAG, "Cloud is newer ($cloudLastUpdated > $localLastUpdated), calling update_local_with_cloud()")
-                updateLocalWithCloud(context, profile)
-            }
-        }
+        updateLocalWithCloud(context, profile)
     }
     
     /**

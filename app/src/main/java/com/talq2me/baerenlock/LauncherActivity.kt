@@ -4,6 +4,8 @@ import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
@@ -36,7 +38,7 @@ class LauncherActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
     private var rewardMinutesTextView: TextView? = null
     private var backgroundImageView: ImageView? = null
-    private var cloudToggleButton: ImageButton? = null
+    private var internetIndicatorButton: Button? = null
 
     companion object {
         private const val TAG = "LauncherActivity"
@@ -136,17 +138,17 @@ class LauncherActivity : AppCompatActivity() {
         }
         topBar.addView(settingsButton)
 
-        // Cloud sync toggle button
-        cloudToggleButton = ImageButton(this).apply {
-            setImageResource(R.drawable.ic_cloud)
-            layoutParams = LinearLayout.LayoutParams(80, 80)
+        // Internet-availability indicator (read-only; GitHub/Supabase need network)
+        internetIndicatorButton = Button(this).apply {
+            layoutParams = LinearLayout.LayoutParams(120, 80)
             setPadding(16, 16, 16, 16)
-            updateCloudToggleState()
-            setOnClickListener {
-                toggleCloudSync()
-            }
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            isClickable = false
+            isFocusable = false
         }
-        topBar.addView(cloudToggleButton)
+        topBar.addView(internetIndicatorButton)
+        updateInternetIndicatorState()
 
         val versionTextView = TextView(this).apply {
             text = getVersionLabel()
@@ -267,8 +269,8 @@ class LauncherActivity : AppCompatActivity() {
         
         // Banner will be updated by performHealthCheck() which calls updateHealthBanner()
         
-        // Update cloud toggle state
-        updateCloudToggleState()
+        // Update internet indicator
+        updateInternetIndicatorState()
 
         // Check for reward minutes from intent (in case we missed it in onCreate/onNewIntent)
         processIncomingRewardMinutes(intent)
@@ -1221,40 +1223,27 @@ class LauncherActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateCloudToggleState() {
-        val isEnabled = SettingsManager.isCloudStorageEnabled(this)
-        cloudToggleButton?.let { button ->
-            // Set background color: green when on, grey when off
-            val color = if (isEnabled) {
-                Color.parseColor("#4CAF50") // Green
-            } else {
-                Color.parseColor("#9E9E9E") // Grey
-            }
-            button.setBackgroundColor(color)
-            button.contentDescription = if (isEnabled) "Cloud sync ON" else "Cloud sync OFF"
+    private fun isNetworkAvailable(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(network) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        } else {
+            @Suppress("DEPRECATION")
+            (cm.activeNetworkInfo?.isConnected == true)
         }
     }
 
-    private fun toggleCloudSync() {
-        val currentState = SettingsManager.isCloudStorageEnabled(this)
-        val newState = !currentState
-        SettingsManager.setCloudStorageEnabled(this, newState)
-        updateCloudToggleState()
-        
-        if (newState) {
-            // Cloud sync enabled - trigger immediate sync
-            Toast.makeText(this, "Cloud sync enabled - syncing...", Toast.LENGTH_SHORT).show()
-            SettingsManager.downloadUserDataFromCloud(this)
-            // Also trigger a sync of local data to cloud
-            val profile = readProfile() ?: "AM"
-            SettingsManager.syncAppListsToCloudAsync(this)
-            // Reload reward minutes after sync
-            Handler(Looper.getMainLooper()).postDelayed({
-                RewardManager.loadRewardMinutes(this)
-                updateRewardMinutesDisplay()
-            }, 2000) // Wait 2 seconds for sync to complete
-        } else {
-            Toast.makeText(this, "Cloud sync disabled", Toast.LENGTH_SHORT).show()
+    /** Read-only indicator: shows whether internet is available (GitHub and Supabase need it). */
+    private fun updateInternetIndicatorState() {
+        val online = isNetworkAvailable()
+        internetIndicatorButton?.let { button ->
+            button.text = if (online) "🌐 Online" else "🌐 Offline"
+            val color = if (online) Color.parseColor("#4CAF50") else Color.parseColor("#9E9E9E")
+            button.setBackgroundColor(color)
+            button.contentDescription = if (online) "Internet available" else "No internet"
         }
     }
 
