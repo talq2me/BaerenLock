@@ -25,7 +25,11 @@ import android.widget.*
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class LauncherActivity : AppCompatActivity() {
 
@@ -72,13 +76,18 @@ class LauncherActivity : AppCompatActivity() {
         // Preload settings from Supabase on startup (this also ensures device record exists)
         SettingsManager.preloadSettings(this)
 
-        // CRITICAL: Check cloud profile before ensureDeviceRecord, so we don't overwrite cloud with old local value
-        Log.d(TAG, "Checking profile from cloud before ensuring device record")
-        val profileChanged = SettingsManager.checkAndApplyProfileFromCloud(this)
-        if (profileChanged) {
-            Log.d(TAG, "Profile changed during onCreate, will refresh UI after initialization")
+        // Check cloud profile in background (do not block main thread — was causing ANR on cold start)
+        Log.d(TAG, "Checking profile from cloud (async)")
+        lifecycleScope.launch {
+            val profileChanged = withContext(Dispatchers.IO) {
+                SettingsManager.checkAndApplyProfileFromCloudSuspend(this@LauncherActivity)
+            }
+            if (profileChanged) {
+                Log.d(TAG, "Profile changed during onCreate, refreshing UI")
+                refreshUiAfterProfileChangeFromCloud()
+            }
         }
-        
+
         // Request overlay permission if not granted
         maybeRequestOverlayPermission()
         
@@ -260,11 +269,15 @@ class LauncherActivity : AppCompatActivity() {
             refreshIcons(appGrid)
         }
         
-        // CRITICAL: Check for profile changes from cloud BEFORE refreshing UI
-        // This ensures the UI displays the correct profile after sync
-        val profileChanged = SettingsManager.checkAndApplyProfileFromCloud(this)
-        
-        // Refresh background image in case it was cleared from memory or profile changed
+        // Check for profile changes from cloud in background (do not block main thread)
+        lifecycleScope.launch {
+            val profileChanged = withContext(Dispatchers.IO) {
+                SettingsManager.checkAndApplyProfileFromCloudSuspend(this@LauncherActivity)
+            }
+            if (profileChanged) refreshUiAfterProfileChangeFromCloud()
+        }
+
+        // Refresh background image in case it was cleared from memory
         refreshBackgroundImage()
         
         // Banner will be updated by performHealthCheck() which calls updateHealthBanner()
@@ -983,6 +996,13 @@ class LauncherActivity : AppCompatActivity() {
                 setBackgroundColor(Color.parseColor("#2D2D2D"))
             }
         }
+    }
+
+    /** Call after profile was updated from cloud (e.g. from async checkAndApplyProfileFromCloudSuspend). */
+    private fun refreshUiAfterProfileChangeFromCloud() {
+        refreshBackgroundImage()
+        updateRewardMinutesDisplay()
+        if (::appGrid.isInitialized) refreshIcons(appGrid)
     }
 
     private fun refreshBackgroundImage() {

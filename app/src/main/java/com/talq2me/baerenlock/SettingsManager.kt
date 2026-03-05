@@ -677,19 +677,15 @@ object SettingsManager {
     }
     
     /**
-     * Checks for profile changes from cloud devices table and applies them locally if different
-     * This allows BaerenLock and BaerenEd to sync the active profile between apps
-     * Should be called on app startup/resume, BEFORE ensureDeviceRecord
-     * This version is synchronous with a timeout to ensure it completes before other code runs
+     * Suspend version: checks for profile changes from cloud and applies locally.
+     * Call from a coroutine with Dispatchers.IO (e.g. withContext(Dispatchers.IO)). Do NOT call from main thread (causes ANR).
      * @return true if profile was changed, false otherwise
      */
-    fun checkAndApplyProfileFromCloud(context: Context): Boolean {
-        // Use runBlocking with a timeout to ensure this completes before ensureDeviceRecord runs
-        return runBlocking {
-            try {
-                withTimeout(5000) { // 5 second timeout
-                    val cloudProfileData = CloudSyncManager.getActiveProfileFromCloud(context)
-                    if (cloudProfileData != null) {
+    suspend fun checkAndApplyProfileFromCloudSuspend(context: Context): Boolean {
+        return try {
+            withTimeout(5000) {
+                val cloudProfileData = CloudSyncManager.getActiveProfileFromCloud(context)
+                if (cloudProfileData != null) {
                         val currentProfile = ProfileManager.readProfile(context)
                         val localTimestamp = ProfileManager.getLocalProfileTimestamp(context)
                         val cloudTimestamp = cloudProfileData.lastUpdated
@@ -766,18 +762,25 @@ object SettingsManager {
                             return@withTimeout true
                         }
                     }
-                    return@withTimeout false // Profile was not changed
+                    return@withTimeout false
                 }
-            } catch (e: TimeoutCancellationException) {
-                Log.w(TAG, "Timeout checking profile from cloud: ${e.message}")
-                false
-            } catch (e: Exception) {
-                Log.w(TAG, "Error checking profile from cloud: ${e.message}")
-                false
-            }
+        } catch (e: TimeoutCancellationException) {
+            Log.w(TAG, "Timeout checking profile from cloud: ${e.message}")
+            false
+        } catch (e: Exception) {
+            Log.w(TAG, "Error checking profile from cloud: ${e.message}")
+            false
         }
     }
-    
+
+    /**
+     * Blocking version. Do NOT call from main/UI thread (causes ANR). Prefer checkAndApplyProfileFromCloudSuspend from a coroutine.
+     * @return true if profile was changed, false otherwise
+     */
+    fun checkAndApplyProfileFromCloud(context: Context): Boolean = runBlocking(Dispatchers.IO) {
+        checkAndApplyProfileFromCloudSuspend(context)
+    }
+
     /**
      * Updates last_updated timestamp in settings prefs to trigger cloud sync
      * This is called whenever settings that should sync to cloud are changed (as per Daily Reset Logic)

@@ -25,8 +25,8 @@ android {
         applicationId = "com.talq2me.baerenlock"
         minSdk = 28
         targetSdk = 35
-        versionCode = 60
-        versionName = "60"
+        versionCode = 61
+        versionName = "61"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         
