@@ -186,7 +186,7 @@ object CloudSyncManager {
                 response.close()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error loading settings from cloud", e)
+            Log.e(TAG, "Error loading settings from cloud: ${e.message}", e)
         }
         null
     }
@@ -427,10 +427,11 @@ object CloudSyncManager {
     }
 
     /**
-     * Syncs current reward minutes to cloud user_data table
+     * Syncs current reward minutes to cloud user_data table.
+     * @param rewardTimeExpiry Optional EST timestamp (yyyy-MM-dd HH:mm:ss.SSS) for when reward time expires; included in PATCH when non-null.
      * @param skipTimestampCheck If true, skips timestamp check (for use in updateCloudWithLocal where cloud_sync already determined local is newer)
      */
-    suspend fun syncRewardMinutesToCloud(context: Context, rewardMinutes: Int, skipTimestampCheck: Boolean = false): Boolean = withContext(Dispatchers.IO) {
+    suspend fun syncRewardMinutesToCloud(context: Context, rewardMinutes: Int, skipTimestampCheck: Boolean = false, rewardTimeExpiry: String? = null): Boolean = withContext(Dispatchers.IO) {
         if (!isConfigured(context)) {
             Log.d(TAG, "Supabase not configured, skipping reward minutes sync")
             return@withContext false
@@ -484,13 +485,15 @@ object CloudSyncManager {
             // Generate timestamp in ISO 8601 format with EST timezone (same format as BaerenEd)
             val lastUpdated = generateESTTimestamp()
             
-            // Update banked_mins AND last_updated timestamp in user_data table
+            // Update banked_mins, last_updated, and reward_time_expiry (null clears expiry) in user_data table
+            val expiryValue = rewardTimeExpiry?.takeIf { it.isNotBlank() }
             val updateMap = mapOf(
                 "banked_mins" to rewardMinutes,
-                "last_updated" to lastUpdated
+                "last_updated" to lastUpdated,
+                "reward_time_expiry" to expiryValue
             )
-            
-            val json = gson.toJson(updateMap)
+            val gsonWithNulls = GsonBuilder().serializeNulls().create()
+            val json = gsonWithNulls.toJson(updateMap)
             val baseUrl = "${getSupabaseUrl(context)}/rest/v1/user_data"
             val requestBody = json.toRequestBody("application/json".toMediaType())
             
@@ -569,7 +572,9 @@ object CloudSyncManager {
                         return@withContext true
                     }
                     
-                    val today = Calendar.getInstance().apply {
+                    // Compare date part in EST only (per Daily Reset Logic)
+                    val estZone = java.util.TimeZone.getTimeZone("America/New_York")
+                    val today = Calendar.getInstance(estZone).apply {
                         set(Calendar.HOUR_OF_DAY, 0)
                         set(Calendar.MINUTE, 0)
                         set(Calendar.SECOND, 0)
@@ -579,7 +584,7 @@ object CloudSyncManager {
                     
                     try {
                         val resetDate = parseCloudTimestamp(lastReset)
-                        val resetCalendar = Calendar.getInstance().apply {
+                        val resetCalendar = Calendar.getInstance(estZone).apply {
                             timeInMillis = resetDate.time
                             set(Calendar.HOUR_OF_DAY, 0)
                             set(Calendar.MINUTE, 0)
@@ -589,7 +594,7 @@ object CloudSyncManager {
                         
                         val needsReset = resetCalendar.timeInMillis != todayMillis
                         if (needsReset) {
-                            Log.d(TAG, "Reset needed: last_reset=$lastReset is from different day for profile: $cloudProfile")
+                            Log.d(TAG, "Reset needed: last_reset=$lastReset is from different day (EST) for profile: $cloudProfile")
                         }
                         return@withContext needsReset
                     } catch (e: Exception) {
@@ -669,6 +674,40 @@ object CloudSyncManager {
     }
     
     /**
+     * Calls Postgres function af_daily_reset(p_profile) so the profile's row is reset if last_reset date <> today (EST).
+     * Call before reading user_data so main screen and any download see reset-applied data.
+     */
+    private suspend fun invokeAfDailyReset(context: Context, cloudProfile: String): Boolean = withContext(Dispatchers.IO) {
+        if (!isConfigured(context)) return@withContext false
+        return@withContext try {
+            val url = "${getSupabaseUrl(context)}/rest/v1/rpc/af_daily_reset"
+            val body = """{"p_profile":"$cloudProfile"}""".toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url(url)
+                .post(body)
+                .addHeader("apikey", getSupabaseKey(context))
+                .addHeader("Authorization", "Bearer ${getSupabaseKey(context)}")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Prefer", "return=minimal")
+                .build()
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                response.close()
+                Log.d(TAG, "af_daily_reset($cloudProfile) invoked successfully")
+                true
+            } else {
+                val errorBody = response.body?.string() ?: "Unknown error"
+                Log.w(TAG, "af_daily_reset($cloudProfile) failed: ${response.code} - $errorBody")
+                response.close()
+                false
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "invokeAfDailyReset($cloudProfile) error: ${e.message}")
+            false
+        }
+    }
+
+    /**
      * Downloads user_data from cloud for a specific profile
      * @param isRetry true if this is a retry after triggering a reset (prevents infinite loops)
      */
@@ -677,6 +716,9 @@ object CloudSyncManager {
             Log.d(TAG, "Supabase not configured, skipping user_data download")
             return@withContext false
         }
+
+        // Run Postgres daily reset for this profile before read (main screen, etc.)
+        invokeAfDailyReset(context, cloudProfile)
 
         // Prevent concurrent downloads for the same profile
         if (downloadingProfiles.contains(cloudProfile)) {
@@ -714,7 +756,9 @@ object CloudSyncManager {
                         val cloudBankedMins = (userData["banked_mins"] as? Number)?.toInt() ?: 0
                         RewardStorage.setCurrentRewardMinutes(cloudBankedMins)
                         RewardManager.currentRewardMinutes = cloudBankedMins
-                        Log.d(TAG, "Applied banked_mins from cloud to in-memory: $cloudBankedMins for profile: $cloudProfile (online-only, no local persistence)")
+                        val cloudRewardTimeExpiry = userData["reward_time_expiry"] as? String
+                        RewardStorage.setRewardTimeExpiry(cloudRewardTimeExpiry)
+                        Log.d(TAG, "Applied banked_mins from cloud to in-memory: $cloudBankedMins, reward_time_expiry: $cloudRewardTimeExpiry for profile: $cloudProfile (online-only, no local persistence)")
                         
                         // Apply app lists from cloud to local prefs (cache overwritten by cloud; no local source of truth)
                         applyAppListsFromUserData(context, userData)
@@ -736,7 +780,7 @@ object CloudSyncManager {
                 return@withContext false
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error downloading user_data from cloud", e)
+            Log.e(TAG, "Error downloading user_data from cloud: ${e.message}", e)
             return@withContext false
         } finally {
             downloadingProfiles.remove(cloudProfile)
@@ -892,7 +936,7 @@ object CloudSyncManager {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error syncing health check to cloud", e)
+            Log.e(TAG, "Error syncing health check to cloud: ${e.message}", e)
         }
         false
     }
@@ -1275,7 +1319,7 @@ object CloudSyncManager {
     
     /**
      * Generates EST timestamp in database format (no offset).
-     * Format: yyyy-MM-dd HH:mm:ss.SSS (EST)
+     * System now() is UTC; we convert to EST for the DB. Format: yyyy-MM-dd HH:mm:ss.SSS (America/New_York).
      */
     fun generateESTTimestamp(): String {
         val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
@@ -1284,9 +1328,35 @@ object CloudSyncManager {
         dateFormat.timeZone = estTimeZone
         return dateFormat.format(now)
     }
+
+    /**
+     * Computes reward_time_expiry as now (EST) + minutes. Format: yyyy-MM-dd HH:mm:ss.SSS (America/New_York).
+     */
+    fun computeRewardTimeExpiryEst(context: Context, minutesFromNow: Int): String {
+        val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
+        val cal = java.util.Calendar.getInstance(estTimeZone)
+        cal.add(java.util.Calendar.MINUTE, minutesFromNow)
+        val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
+        dateFormat.timeZone = estTimeZone
+        return dateFormat.format(cal.time)
+    }
+
+    /**
+     * Returns true if current time (EST) is after the given expiry string (EST). If expiry is null, returns false.
+     */
+    fun isAfterRewardTimeExpiry(expiryEst: String?): Boolean {
+        if (expiryEst.isNullOrBlank()) return false
+        return try {
+            parseTimestampForComparison(expiryEst) < System.currentTimeMillis()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse reward_time_expiry: $expiryEst", e)
+            false
+        }
+    }
     
     /**
-     * Parses timestamp to Date (EST), accepts DB format or ISO variants.
+     * Parses a timestamp from user_data (e.g. last_reset). Stored and returned in EST — parse as EST, do not convert.
+     * Accepts DB format or ISO variants.
      */
     private fun parseCloudTimestamp(timestamp: String): Date {
         return try {
@@ -1394,10 +1464,10 @@ object CloudSyncManager {
      * Async wrapper for syncRewardMinutesToCloud.
      * @param skipTimestampCheck When true (online-only mode), always push to cloud without comparing timestamps.
      */
-    fun syncRewardMinutesToCloudAsync(context: Context, rewardMinutes: Int, skipTimestampCheck: Boolean = false) {
+    fun syncRewardMinutesToCloudAsync(context: Context, rewardMinutes: Int, skipTimestampCheck: Boolean = false, rewardTimeExpiry: String? = null) {
         syncScope.launch {
             try {
-                syncRewardMinutesToCloud(context, rewardMinutes, skipTimestampCheck)
+                syncRewardMinutesToCloud(context, rewardMinutes, skipTimestampCheck, rewardTimeExpiry)
             } catch (e: Exception) {
                 Log.w(TAG, "Could not sync reward minutes to cloud: ${e.message}")
             }

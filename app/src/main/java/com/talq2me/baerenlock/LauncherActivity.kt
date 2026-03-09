@@ -147,17 +147,60 @@ class LauncherActivity : AppCompatActivity() {
         }
         topBar.addView(settingsButton)
 
-        // Internet-availability indicator (read-only; GitHub/Supabase need network)
+        // Internet-availability indicator (read-only; same style as BaerenEd)
         internetIndicatorButton = Button(this).apply {
-            layoutParams = LinearLayout.LayoutParams(120, 80)
-            setPadding(16, 16, 16, 16)
-            textSize = 12f
-            setTextColor(Color.WHITE)
+            text = "🌐 Offline" // updated by updateInternetIndicatorState()
+            textSize = 14f
+            setTextColor(resources.getColor(android.R.color.white, null))
             isClickable = false
             isFocusable = false
+            layoutParams = LinearLayout.LayoutParams(
+                100.dpToPx(),
+                (32 * resources.displayMetrics.density).toInt()
+            ).apply {
+                marginEnd = 12.dpToPx()
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            background = resources.getDrawable(R.drawable.button_rounded, null)
+            setPadding(8.dpToPx(), 4.dpToPx(), 8.dpToPx(), 4.dpToPx())
+            gravity = Gravity.CENTER
         }
         topBar.addView(internetIndicatorButton)
         updateInternetIndicatorState()
+
+        // Refresh button: pull latest from cloud, then update reward display and icons (same style as BaerenEd)
+        val refreshBtn = Button(this).apply {
+            text = "🔄 Refresh"
+            textSize = 14f
+            setTextColor(resources.getColor(android.R.color.white, null))
+            layoutParams = LinearLayout.LayoutParams(
+                100.dpToPx(),
+                (32 * resources.displayMetrics.density).toInt()
+            ).apply {
+                marginEnd = 12.dpToPx()
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            background = resources.getDrawable(R.drawable.button_rounded, null)
+            setPadding(8.dpToPx(), 4.dpToPx(), 8.dpToPx(), 4.dpToPx())
+            gravity = Gravity.CENTER
+            setOnClickListener { view ->
+                Log.d(TAG, "Refresh button: pulling latest from cloud for profile ${readProfile()}")
+                view.isEnabled = false
+                SettingsManager.runResetThenDownload(this@LauncherActivity) {
+                    RewardManager.loadRewardMinutes(this@LauncherActivity)
+                    if (RewardManager.currentRewardMinutes > 0) {
+                        RewardManager.startRewardTimer(this@LauncherActivity)
+                    }
+                    updateRewardMinutesDisplay()
+                    if (::appGrid.isInitialized) refreshIcons(appGrid)
+                    refreshBackgroundImage()
+                    updateInternetIndicatorState()
+                    view.isEnabled = true
+                    Toast.makeText(this@LauncherActivity, "Refreshed from server", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        topBar.addView(refreshBtn)
 
         val versionTextView = TextView(this).apply {
             text = getVersionLabel()
@@ -324,14 +367,14 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun updateRewardMinutesDisplay() {
-        val minutes = RewardManager.currentRewardMinutes
+        val minutes = RewardManager.getEffectiveRewardMinutes(this)
         runOnUiThread {
             // Only update text if it changed (avoid unnecessary UI updates)
             if (minutes != lastDisplayedRewardMinutes) {
                 rewardMinutesTextView?.text = "Reward: $minutes min"
                 
                 // CRITICAL: Refresh icons when reward minutes cross the zero threshold
-                // This ensures reward apps appear/disappear when banked_mins changes
+                // This ensures reward apps appear/disappear when banked_mins or reward_time_expiry changes
                 val crossedZeroThreshold = (lastDisplayedRewardMinutes == 0 && minutes > 0) ||
                                          (lastDisplayedRewardMinutes > 0 && minutes == 0)
                 if (crossedZeroThreshold) {
@@ -907,8 +950,9 @@ class LauncherActivity : AppCompatActivity() {
                     // Load current reward minutes
                     RewardManager.loadRewardMinutes(this)
                     
-                    // Add the new reward minutes
+                    // Add the new reward minutes and set reward_time_expiry (now_est + new total)
                     RewardManager.currentRewardMinutes += minutes
+                    RewardStorage.setRewardTimeExpiry(CloudSyncManager.computeRewardTimeExpiryEst(this, RewardManager.currentRewardMinutes))
                     RewardManager.saveRewardMinutes(this)
                     
                     // Update start minutes for usage-based tracking
@@ -1201,6 +1245,7 @@ class LauncherActivity : AppCompatActivity() {
             RewardManager.loadRewardMinutes(this)
             val previousMinutes = RewardManager.currentRewardMinutes
             RewardManager.currentRewardMinutes += incomingRewardMinutes
+            RewardStorage.setRewardTimeExpiry(CloudSyncManager.computeRewardTimeExpiryEst(this, RewardManager.currentRewardMinutes))
             RewardManager.saveRewardMinutes(this)
             
             // Update start minutes for usage-based tracking
@@ -1225,6 +1270,7 @@ class LauncherActivity : AppCompatActivity() {
             RewardManager.loadRewardMinutes(this)
             val previousMinutes = RewardManager.currentRewardMinutes
             RewardManager.currentRewardMinutes += incomingRewardMinutes
+            RewardStorage.setRewardTimeExpiry(CloudSyncManager.computeRewardTimeExpiryEst(this, RewardManager.currentRewardMinutes))
             RewardManager.saveRewardMinutes(this)
             
             // Update start minutes for usage-based tracking
@@ -1256,15 +1302,18 @@ class LauncherActivity : AppCompatActivity() {
         }
     }
 
-    /** Read-only indicator: shows whether internet is available (GitHub and Supabase need it). */
+    /** Read-only indicator: shows whether internet is available (GitHub and Supabase need it). Same style as BaerenEd. */
     private fun updateInternetIndicatorState() {
         val online = isNetworkAvailable()
         internetIndicatorButton?.let { button ->
             button.text = if (online) "🌐 Online" else "🌐 Offline"
-            val color = if (online) Color.parseColor("#4CAF50") else Color.parseColor("#9E9E9E")
-            button.setBackgroundColor(color)
+            button.background = resources.getDrawable(
+                if (online) R.drawable.button_rounded_success else R.drawable.button_rounded,
+                null
+            )
             button.contentDescription = if (online) "Internet available" else "No internet"
         }
     }
 
+    private fun Int.dpToPx(): Int = (this * resources.displayMetrics.density).toInt()
 }

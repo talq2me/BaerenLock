@@ -575,10 +575,7 @@ object SettingsManager {
                 val profile = ProfileManager.getCurrentProfile(context)
                 val needsReset = CloudSyncManager.checkIfResetNeeded(context, profile)
                 if (needsReset) {
-                    Log.d(TAG, "Reset needed for profile: $profile, performing local reset first then cloud reset")
-                    // CRITICAL: Clear local banked_mins (and set last_reset/last_updated) before triggering cloud reset.
-                    // Otherwise a later downloadUserDataFromCloud can see "local newer" and push stale banked_mins to cloud.
-                    DailyResetAndSyncManager.performLocalResetOnly(context, profile)
+                    Log.d(TAG, "Reset needed for profile: $profile, resetting DB then pull will apply")
                     val success = CloudSyncManager.triggerCloudReset(context, profile)
                     if (success) {
                         Log.d(TAG, "Successfully triggered cloud reset for profile: $profile")
@@ -614,8 +611,7 @@ object SettingsManager {
                 val profile = ProfileManager.getCurrentProfile(context)
                 val needsReset = CloudSyncManager.checkIfResetNeeded(context, profile)
                 if (needsReset) {
-                    Log.d(TAG, "Reset needed for profile: $profile, performing local reset first then cloud reset")
-                    DailyResetAndSyncManager.performLocalResetOnly(context, profile)
+                    Log.d(TAG, "Reset needed for profile: $profile, resetting DB then pull will apply")
                     CloudSyncManager.triggerCloudReset(context, profile)
                 }
                 CloudSyncManager.downloadUserDataFromCloud(context, profile, isRetry = false)

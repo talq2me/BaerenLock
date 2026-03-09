@@ -17,6 +17,15 @@ object RewardStorage {
     // In-memory cache only (no persistence). Populated from cloud fetch; pushed to cloud on change.
     @Volatile
     private var currentRewardMinutes: Int = 0
+
+    /** Reward time expiry in EST (yyyy-MM-dd HH:mm:ss.SSS). Null = no expiry (unlimited by time). */
+    @Volatile
+    private var rewardTimeExpiry: String? = null
+
+    fun getRewardTimeExpiry(): String? = rewardTimeExpiry
+    fun setRewardTimeExpiry(expiry: String?) {
+        rewardTimeExpiry = expiry
+    }
     
     /**
      * Gets the current reward minutes from memory (populated by cloud fetch).
@@ -46,16 +55,18 @@ object RewardStorage {
      */
     fun resetRewardMinutesLocal(context: Context) {
         currentRewardMinutes = 0
+        rewardTimeExpiry = null
         Log.d(TAG, "Reset reward minutes in memory to 0 (online-only: no local persistence)")
     }
     
     /**
      * Pushes current reward minutes to cloud only. No local persistence.
      * Use when value has changed (timer decrement, add minutes, reset).
+     * @param rewardTimeExpiryOptional If non-null, also PATCH reward_time_expiry to this value (e.g. when granting time).
      */
-    fun saveRewardMinutes(context: Context, updateLastUpdated: Boolean = true) {
+    fun saveRewardMinutes(context: Context, updateLastUpdated: Boolean = true, rewardTimeExpiryOptional: String? = null) {
         Log.d(TAG, "Saving reward minutes to cloud only: $currentRewardMinutes (online-only)")
-        CloudSyncManager.syncRewardMinutesToCloudAsync(context, currentRewardMinutes, skipTimestampCheck = true)
+        CloudSyncManager.syncRewardMinutesToCloudAsync(context, currentRewardMinutes, skipTimestampCheck = true, rewardTimeExpiry = rewardTimeExpiryOptional ?: rewardTimeExpiry)
     }
     
     /**
@@ -69,12 +80,13 @@ object RewardStorage {
     }
     
     /**
-     * Adds reward minutes to the current total and pushes to cloud.
+     * Adds reward minutes to the current total, sets expiry to now_est + new total, and pushes to cloud.
      */
     fun addRewardMinutes(context: Context, minutes: Int) {
         currentRewardMinutes += minutes
+        rewardTimeExpiry = CloudSyncManager.computeRewardTimeExpiryEst(context, currentRewardMinutes)
         saveRewardMinutes(context)
-        Log.d(TAG, "Added $minutes reward minutes. New total: $currentRewardMinutes (pushed to cloud)")
+        Log.d(TAG, "Added $minutes reward minutes. New total: $currentRewardMinutes, expiry: $rewardTimeExpiry (pushed to cloud)")
     }
     
     /**

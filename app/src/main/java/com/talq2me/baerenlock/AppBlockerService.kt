@@ -347,15 +347,12 @@ class AppBlockerService : AccessibilityService() {
             return true
         }
 
-        // Block if it's a reward-eligible app with 0 minutes (expired reward)
-        // IMPORTANT: Read directly from storage to avoid race conditions with in-memory cache
+        // Block if it's a reward-eligible app with 0 effective minutes (expired reward or past reward_time_expiry)
         val isRewardApp = RewardManager.rewardEligibleApps.contains(pkgName)
         if (isRewardApp) {
-            // Read directly from SharedPreferences to get the most up-to-date value
-            val storedRewardMinutes = RewardStorage.getCurrentRewardMinutesFromStorage(this)
-            val hasRewardMinutes = storedRewardMinutes > 0
-            if (!hasRewardMinutes) {
-                Log.d("AppBlocker", "🚫 Blocking reward app $pkgName: storedRewardMinutes=$storedRewardMinutes (reward time expired)")
+            val effectiveRewardMinutes = RewardManager.getEffectiveRewardMinutes(this)
+            if (effectiveRewardMinutes <= 0) {
+                Log.d("AppBlocker", "🚫 Blocking reward app $pkgName: effectiveRewardMinutes=$effectiveRewardMinutes (reward time expired or past expiry)")
                 return true
             }
         }

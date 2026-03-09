@@ -23,6 +23,17 @@ object RewardManager {
     var currentRewardMinutes: Int
         get() = RewardStorage.getCurrentRewardMinutes()
         set(value) = RewardStorage.setCurrentRewardMinutes(value)
+
+    /**
+     * Effective reward minutes: 0 if reward_time_expiry is set and current time is past it; otherwise current minutes.
+     * Use this for "can use reward apps" and blocking logic.
+     */
+    fun getEffectiveRewardMinutes(context: Context): Int {
+        if (CloudSyncManager.isAfterRewardTimeExpiry(RewardStorage.getRewardTimeExpiry())) {
+            return 0
+        }
+        return currentRewardMinutes
+    }
     
     private var rewardTimer: Handler? = null
     private var rewardRunnable: Runnable? = null
@@ -382,6 +393,17 @@ object RewardManager {
      * This allows the reward timer to run even when BaerenLock is in the background.
      */
     fun performTimerCheck(context: Context) {
+        // Enforce reward_time_expiry: if past expiry, treat as 0 and sync
+        if (CloudSyncManager.isAfterRewardTimeExpiry(RewardStorage.getRewardTimeExpiry())) {
+            if (currentRewardMinutes > 0) {
+                Log.d(TAG, "Reward time expired by reward_time_expiry; setting minutes to 0 and syncing")
+                currentRewardMinutes = 0
+                RewardStorage.setRewardTimeExpiry(null)
+                RewardStorage.saveRewardMinutes(context)
+                handleRewardTimeExpired(context)
+            }
+            return
+        }
         // Only check if we have reward minutes
         if (currentRewardMinutes <= 0) {
             // No reward time - ensure timer state is reset
@@ -690,6 +712,14 @@ object RewardManager {
             return
         }
         
+        // If we have minutes but no expiry (e.g. loaded from cloud only), set expiry to now + minutes to prevent unlimited use
+        if (currentRewardMinutes > 0 && RewardStorage.getRewardTimeExpiry().isNullOrBlank()) {
+            val expiry = CloudSyncManager.computeRewardTimeExpiryEst(context, currentRewardMinutes)
+            RewardStorage.setRewardTimeExpiry(expiry)
+            saveRewardMinutes(context)
+            Log.d(TAG, "Set reward_time_expiry to $expiry (was null; now + $currentRewardMinutes min)")
+        }
+
         // Initialize timing tracking if this is a new session (timer not running)
         val currentTime = System.currentTimeMillis()
         val isNewSession = (lastRewardDecrementTime == 0L || rewardRunnable == null)
