@@ -1,125 +1,97 @@
 package com.talq2me.baerenlock
 
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.LauncherApps
 import android.os.Bundle
+import android.os.UserHandle
+import android.util.Log
 import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
-import android.util.Log
-import android.content.pm.PackageManager
-import android.content.pm.ResolveInfo
-import android.content.Context
-import android.content.pm.LauncherApps
-import android.os.UserHandle
-
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class WhitelistSettingsActivity : AppCompatActivity() {
 
-    private val allowed = RewardManager.allowedApps
+    companion object {
+        private const val TAG = "WhitelistSettings"
+    }
+
+    private val selectedPackages = mutableSetOf<String>()
+    private var initialPackages = emptySet<String>()
+    private var loaded = false
+    private var contentLayout: LinearLayout? = null
+    private var headerView: TextView? = null
+    private var allAppsInfo: List<Pair<String, String>> = emptyList() // (pkg, label)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { saveAndFinish() }
+        })
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(16, 16, 16, 16)
         }
-
-        val pm = packageManager
-        val launcherApps = getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
-        
-        // Get all apps that can be launched (like KidsPlace does)
-        val apps = launcherApps.getActivityList(null, UserHandle.getUserHandleForUid(android.os.Process.myUid()))
-        
-        Log.d("WhitelistSettings", "LauncherApps found: ${apps.size}")
-        
-        // Show all launcher apps except our own app
-        val allApps = apps
-            .filter { app ->
-                // Only exclude our own app
-                val isOurApp = app.applicationInfo.packageName == packageName
-                if (isOurApp) {
-                    Log.d("WhitelistSettings", "Filtering out our own app: ${app.applicationInfo.packageName}")
-                }
-                !isOurApp
-            }
-            .distinctBy { it.applicationInfo.packageName } // Remove duplicates
-            .sortedBy { app ->
-                try {
-                    app.label.toString()
-                } catch (e: Exception) {
-                    app.applicationInfo.packageName
-                }
-            }
-
-        Log.d("WhitelistSettings", "Apps to show: ${allApps.size}")
-        
-        // Debug: Show first 20 apps to see what we're getting
-        allApps.take(20).forEach { app ->
-            Log.d("WhitelistSettings", "App: ${app.label} (${app.applicationInfo.packageName})")
-        }
-        
-        // Count only the apps that are actually in the whitelist
-        val whitelistedCount = allApps.count { app ->
-            allowed.contains(app.applicationInfo.packageName)
-        }
-        
-        Log.d("WhitelistSettings", "Currently whitelisted apps: $whitelistedCount")
-
-        // Add header showing counts
-        val header = TextView(this).apply {
-            text = "Found ${allApps.size} apps. Currently whitelisted: $whitelistedCount"
+        val loadingView = TextView(this).apply {
+            text = "Loading from database..."
             setPadding(0, 0, 0, 16)
         }
-        layout.addView(header)
+        layout.addView(loadingView)
+        contentLayout = layout
+        setContentView(ScrollView(this).apply { addView(layout) })
 
-        for (app in allApps) {
-            val pkg = app.applicationInfo.packageName
-            val appName = try {
-                app.label.toString()
-            } catch (e: Exception) {
-                pkg
+        lifecycleScope.launch {
+            val profile = ProfileManager.getCurrentProfile(this@WhitelistSettingsActivity)
+            val fromCloud = withContext(Dispatchers.IO) { CloudSyncManager.fetchAppListsFromCloud(this@WhitelistSettingsActivity, profile) }
+            val whitelistFromDb = fromCloud?.whiteListed ?: emptySet()
+            initialPackages = whitelistFromDb
+            selectedPackages.clear()
+            selectedPackages.addAll(whitelistFromDb)
+
+            val launcherApps = getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
+            val apps = launcherApps.getActivityList(null, UserHandle.getUserHandleForUid(android.os.Process.myUid()))
+            val allApps = apps
+                .filter { it.applicationInfo.packageName != packageName }
+                .distinctBy { it.applicationInfo.packageName }
+                .sortedBy { try { it.label.toString() } catch (_: Exception) { it.applicationInfo.packageName } }
+            val pm = packageManager
+            allAppsInfo = allApps.map { ri ->
+                ri.applicationInfo.packageName to try { ri.label.toString() } catch (_: Exception) { ri.applicationInfo.packageName }
             }
-            
-            Log.d("WhitelistSettings", "Adding app: $appName ($pkg)")
-            
-            val isSystem = isSystemApp(pkg)
-            val cb = CheckBox(this).apply {
-                text = if (isSystem && allowed.contains(pkg)) {
-                    "⚠️ SYSTEM: $appName ($pkg)"
-                } else {
-                    "$appName ($pkg)"
+
+            withContext(Dispatchers.Main) {
+                layout.removeView(loadingView)
+                val header = TextView(this@WhitelistSettingsActivity).apply {
+                    text = "Found ${allAppsInfo.size} apps. Currently whitelisted: ${selectedPackages.size}"
+                    setPadding(0, 0, 0, 16)
                 }
-                isChecked = allowed.contains(pkg)
-                setOnCheckedChangeListener { _, isChecked ->
-                    if (isChecked) {
-                        RewardManager.addToWhitelist(pkg, this@WhitelistSettingsActivity)
-                        Log.d("WhitelistSettings", "Added to whitelist: $pkg")
-                    } else {
-                        RewardManager.removeFromWhitelist(pkg, this@WhitelistSettingsActivity)
-                        Log.d("WhitelistSettings", "Removed from whitelist: $pkg")
+                layout.addView(header)
+                headerView = header
+                for ((pkg, appName) in allAppsInfo) {
+                    val isSystem = isSystemApp(pkg)
+                    val cb = CheckBox(this@WhitelistSettingsActivity).apply {
+                        text = if (isSystem && selectedPackages.contains(pkg)) "⚠️ SYSTEM: $appName ($pkg)" else "$appName ($pkg)"
+                        isChecked = selectedPackages.contains(pkg)
+                        setOnCheckedChangeListener { _, isChecked ->
+                            if (isChecked) selectedPackages.add(pkg) else selectedPackages.remove(pkg)
+                            header.text = "Found ${allAppsInfo.size} apps. Currently whitelisted: ${selectedPackages.size}"
+                            text = if (isSystem && isChecked) "⚠️ SYSTEM: $appName ($pkg)" else "$appName ($pkg)"
+                        }
                     }
-                    // Update the header count and refresh text if it's a system app
-                    val newCount = allApps.count { ri -> allowed.contains(ri.applicationInfo.packageName) }
-                    header.text = "Found ${allApps.size} apps. Currently whitelisted: $newCount"
-                    // Update checkbox text to show/hide system indicator
-                    text = if (isSystem && isChecked) {
-                        "⚠️ SYSTEM: $appName ($pkg)"
-                    } else {
-                        "$appName ($pkg)"
-                    }
+                    layout.addView(cb)
                 }
+                loaded = true
             }
-            layout.addView(cb)
         }
-
-        val scroll = ScrollView(this).apply {
-            addView(layout)
-        }
-
-        setContentView(scroll)
     }
 
     private fun isSystemApp(pkgName: String): Boolean {
@@ -150,9 +122,21 @@ class WhitelistSettingsActivity : AppCompatActivity() {
                pkgName.startsWith("com.google.android.certinstaller")
     }
 
-    override fun onPause() {
-        super.onPause()
-        RewardManager.saveAllowedApps(this)
+    private fun saveAndFinish() {
+        if (!loaded) { finish(); return }
+        if (selectedPackages == initialPackages) { finish(); return }
+        lifecycleScope.launch {
+            val profile = ProfileManager.getCurrentProfile(this@WhitelistSettingsActivity)
+            val json = com.google.gson.Gson().toJson(selectedPackages.toList())
+            val ok = withContext(Dispatchers.IO) {
+                CloudSyncManager.patchAppListToCloud(this@WhitelistSettingsActivity, profile, "white_listed_apps", json)
+            }
+            withContext(Dispatchers.Main) {
+                if (ok) Toast.makeText(this@WhitelistSettingsActivity, "Saved", Toast.LENGTH_SHORT).show()
+                else Toast.makeText(this@WhitelistSettingsActivity, "Save failed", Toast.LENGTH_SHORT).show()
+                finish()
+            }
+        }
     }
 }
 

@@ -427,6 +427,97 @@ object CloudSyncManager {
     }
 
     /**
+     * Fetches app lists from user_data for the profile (DB-only, no daily reset).
+     * Used when opening app list settings so the UI shows current DB state.
+     */
+    data class AppListsFromCloud(
+        val whiteListed: Set<String>,
+        val rewardApps: Set<String>,
+        val blacklisted: Set<String>
+    )
+
+    suspend fun fetchAppListsFromCloud(context: Context, profile: String): AppListsFromCloud? = withContext(Dispatchers.IO) {
+        if (!isConfigured(context)) return@withContext null
+        try {
+            val url = "${getSupabaseUrl(context)}/rest/v1/user_data?profile=eq.$profile&select=white_listed_apps,reward_apps,blacklisted_apps"
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .addHeader("apikey", getSupabaseKey(context))
+                .addHeader("Authorization", "Bearer ${getSupabaseKey(context)}")
+                .build()
+            val response = client.newCall(request).execute()
+            if (!response.isSuccessful) {
+                response.close()
+                return@withContext null
+            }
+            val body = response.body?.string() ?: "[]"
+            response.close()
+            if (body == "[]" || body == "{}") return@withContext AppListsFromCloud(emptySet(), emptySet(), emptySet())
+            val list = gson.fromJson(body, object : TypeToken<List<Map<String, Any?>>>() {}.type) as? List<Map<String, Any?>>
+            val row = list?.firstOrNull() ?: return@withContext AppListsFromCloud(emptySet(), emptySet(), emptySet())
+            val whiteListed = parseJsonArrayToSet(row["white_listed_apps"]) ?: emptySet()
+            val rewardApps = parseJsonArrayToSet(row["reward_apps"]) ?: emptySet()
+            val blacklisted = parseJsonArrayToSet(row["blacklisted_apps"]) ?: emptySet()
+            AppListsFromCloud(whiteListed, rewardApps, blacklisted)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching app lists from cloud", e)
+            null
+        }
+    }
+
+    /**
+     * Saves a single app list column to user_data and updates last_updated. Then applies to local prefs.
+     * Used when exiting app list settings (DB is source of truth).
+     */
+    suspend fun patchAppListToCloud(context: Context, profile: String, columnName: String, jsonValue: String): Boolean = withContext(Dispatchers.IO) {
+        if (!isConfigured(context)) return@withContext false
+        try {
+            val timestamp = generateESTTimestamp()
+            val updateMap = mapOf(columnName to jsonValue, "last_updated" to timestamp)
+            val json = gson.toJson(updateMap)
+            val baseUrl = "${getSupabaseUrl(context)}/rest/v1/user_data"
+            val requestBody = json.toRequestBody("application/json".toMediaType())
+            val updateUrl = "$baseUrl?profile=eq.$profile"
+            val patchRequest = Request.Builder()
+                .url(updateUrl)
+                .patch(requestBody)
+                .addHeader("apikey", getSupabaseKey(context))
+                .addHeader("Authorization", "Bearer ${getSupabaseKey(context)}")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Prefer", "return=minimal")
+                .build()
+            val patchResponse = client.newCall(patchRequest).execute()
+            if (!patchResponse.isSuccessful) {
+                patchResponse.close()
+                return@withContext false
+            }
+            patchResponse.close()
+            // Apply to local prefs so the app uses the new list immediately
+            val set = parseJsonArrayToSet(jsonValue) ?: emptySet<String>()
+            when (columnName) {
+                "white_listed_apps" -> {
+                    context.getSharedPreferences("whitelist_prefs", Context.MODE_PRIVATE).edit().putStringSet("allowed", set).apply()
+                    RewardAppsManager.loadAllowedApps(context)
+                }
+                "reward_apps" -> {
+                    context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE).edit().putStringSet("reward_apps", set).apply()
+                    RewardAppsManager.loadRewardEligibleApps(context)
+                }
+                "blacklisted_apps" -> {
+                    context.getSharedPreferences("blacklist_prefs", Context.MODE_PRIVATE).edit().putStringSet("packages", set).apply()
+                }
+            }
+            context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE).edit().putString("app_lists_timestamp", timestamp).apply()
+            Log.d(TAG, "Saved $columnName to cloud and local for profile: $profile")
+            return@withContext true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error patching app list to cloud", e)
+            false
+        }
+    }
+
+    /**
      * Syncs current reward minutes to cloud user_data table.
      * @param rewardTimeExpiry Optional EST timestamp (yyyy-MM-dd HH:mm:ss.SSS) for when reward time expires; included in PATCH when non-null.
      * @param skipTimestampCheck If true, skips timestamp check (for use in updateCloudWithLocal where cloud_sync already determined local is newer)

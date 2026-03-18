@@ -1,17 +1,23 @@
 package com.talq2me.baerenlock
 
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.LauncherApps
 import android.os.Bundle
+import android.os.UserHandle
+import android.util.Log
 import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
-import android.util.Log
-import android.content.pm.PackageManager
-import android.content.Context
-import android.content.pm.LauncherApps
-import android.os.UserHandle
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class BlackListSettingsActivity : AppCompatActivity() {
 
@@ -19,142 +25,105 @@ class BlackListSettingsActivity : AppCompatActivity() {
         private const val TAG = "BlackListSettings"
     }
 
+    private val selectedPackages = mutableSetOf<String>()
+    private var initialPackages = emptySet<String>()
+    private var loaded = false
+    private var headerView: TextView? = null
+    private var checkboxes = mutableListOf<CheckBox>()
+    private var appPackages = listOf<String>()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { saveAndFinish() }
+        })
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(16, 16, 16, 16)
         }
-
-        val pm = packageManager
-        
-        // Get all installed packages (including system apps) so we can manage everything
-        val installedPackages = pm.getInstalledPackages(0)
-        
-        // Also get launcher apps for labels/icons
-        val launcherApps = getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
-        val launcherAppList = launcherApps.getActivityList(null, UserHandle.getUserHandleForUid(android.os.Process.myUid()))
-        val launcherAppMap = launcherAppList.associateBy { it.applicationInfo.packageName }
-        
-        Log.d(TAG, "Installed packages found: ${installedPackages.size}")
-        Log.d(TAG, "LauncherApps found: ${launcherAppList.size}")
-        
-        // Create a list of all apps with their info
-        data class AppInfo(val packageName: String, val label: String)
-        
-        val allApps = installedPackages
-            .filter { it.packageName != packageName && it.applicationInfo != null } // Exclude our own app and null applicationInfo
-            .map { pkgInfo ->
-                val pkgName = pkgInfo.packageName
-                val launcherInfo = launcherAppMap[pkgName]
-                val label = try {
-                    launcherInfo?.label?.toString() 
-                        ?: (pkgInfo.applicationInfo?.let { pm.getApplicationLabel(it).toString() } ?: pkgName)
-                } catch (e: Exception) {
-                    pkgName
-                }
-                AppInfo(pkgName, label)
-            }
-            .sortedBy { it.label }
-
-        Log.d(TAG, "Apps to show: ${allApps.size}")
-        
-        // Get current blacklist using BlacklistManager
-        val blacklist = BlacklistManager.getBlacklist(this).toMutableSet()
-        
-        // Count apps that are currently blacklisted
-        val blacklistedCount = allApps.count { app ->
-            blacklist.contains(app.packageName)
-        }
-        
-        Log.d(TAG, "Currently blacklisted apps: $blacklistedCount")
-
-        // Add header showing counts
-        val header = TextView(this).apply {
-            text = "Found ${allApps.size} apps. Currently blacklisted: $blacklistedCount"
+        val loadingView = TextView(this).apply {
+            text = "Loading from database..."
             setPadding(0, 0, 0, 16)
         }
-        layout.addView(header)
-        
-        // Add "Clear All" button to remove all blacklist entries
-        val clearAllButton = android.widget.Button(this).apply {
-            text = "Clear All Blacklist Entries"
-            setOnClickListener {
-                clearAllBlacklist()
-                // Refresh the activity
-                finish()
-                startActivity(Intent(this@BlackListSettingsActivity, BlackListSettingsActivity::class.java))
-            }
-        }
-        layout.addView(clearAllButton)
+        layout.addView(loadingView)
+        setContentView(ScrollView(this).apply { addView(layout) })
 
-        for (app in allApps) {
-            val pkg = app.packageName
-            val appName = app.label
-            
-            Log.d(TAG, "Adding app: $appName ($pkg)")
-            
-            val cb = CheckBox(this).apply {
-                text = "$appName ($pkg)"
-                isChecked = blacklist.contains(pkg)
-                setOnCheckedChangeListener { _, isChecked ->
-                    if (isChecked) {
-                        // Add to blacklist
-                        addToBlacklist(pkg)
-                        // Remove from whitelist if it's there
-                        if (RewardManager.allowedApps.contains(pkg)) {
-                            RewardManager.removeFromWhitelist(pkg, this@BlackListSettingsActivity)
-                            Log.d(TAG, "Removed $pkg from whitelist (now blacklisted)")
-                        }
-                        // Remove from reward list if it's there
-                        if (RewardManager.rewardEligibleApps.contains(pkg)) {
-                            RewardManager.rewardEligibleApps.remove(pkg)
-                            // Save reward apps
-                            val currentRewardApps = SettingsManager.readRewardApps(this@BlackListSettingsActivity).toMutableSet()
-                            currentRewardApps.remove(pkg)
-                            SettingsManager.writeRewardApps(this@BlackListSettingsActivity, currentRewardApps)
-                            RewardManager.refreshRewardEligibleApps(this@BlackListSettingsActivity)
-                            Log.d(TAG, "Removed $pkg from reward list (now blacklisted)")
-                        }
-                        Log.d(TAG, "Added to blacklist: $pkg")
-                    } else {
-                        // Remove from blacklist
-                        removeFromBlacklist(pkg)
-                        Log.d(TAG, "Removed from blacklist: $pkg")
-                    }
-                    // Update the header count
-                    val newCount = allApps.count { app -> 
-                        BlacklistManager.getBlacklist(this@BlackListSettingsActivity).contains(app.packageName) 
-                    }
-                    header.text = "Found ${allApps.size} apps. Currently blacklisted: $newCount"
+        lifecycleScope.launch {
+            val profile = ProfileManager.getCurrentProfile(this@BlackListSettingsActivity)
+            val fromCloud = withContext(Dispatchers.IO) { CloudSyncManager.fetchAppListsFromCloud(this@BlackListSettingsActivity, profile) }
+            val blacklistFromDb = fromCloud?.blacklisted ?: emptySet()
+            initialPackages = blacklistFromDb
+            selectedPackages.clear()
+            selectedPackages.addAll(blacklistFromDb)
+
+            val pm = packageManager
+            val installedPackages = pm.getInstalledPackages(0)
+            val launcherApps = getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
+            val launcherAppList = launcherApps.getActivityList(null, UserHandle.getUserHandleForUid(android.os.Process.myUid()))
+            val launcherAppMap = launcherAppList.associateBy { it.applicationInfo.packageName }
+            data class AppInfo(val packageName: String, val label: String)
+            val allApps = installedPackages
+                .filter { it.packageName != packageName && it.applicationInfo != null }
+                .map { pkgInfo ->
+                    val pkgName = pkgInfo.packageName
+                    val label = try {
+                        launcherAppMap[pkgName]?.label?.toString()
+                            ?: (pkgInfo.applicationInfo?.let { pm.getApplicationLabel(it).toString() } ?: pkgName)
+                    } catch (_: Exception) { pkgName }
+                    AppInfo(pkgName, label)
                 }
+                .sortedBy { it.label }
+            appPackages = allApps.map { it.packageName }
+
+            withContext(Dispatchers.Main) {
+                layout.removeView(loadingView)
+                val header = TextView(this@BlackListSettingsActivity).apply {
+                    text = "Found ${allApps.size} apps. Currently blacklisted: ${selectedPackages.size}"
+                    setPadding(0, 0, 0, 16)
+                }
+                layout.addView(header)
+                headerView = header
+                layout.addView(android.widget.Button(this@BlackListSettingsActivity).apply {
+                    text = "Clear All Blacklist Entries"
+                    setOnClickListener {
+                        selectedPackages.clear()
+                        checkboxes.forEach { it.isChecked = false }
+                        headerView?.text = "Found ${appPackages.size} apps. Currently blacklisted: 0"
+                    }
+                })
+                checkboxes.clear()
+                for (app in allApps) {
+                    val pkg = app.packageName
+                    val cb = CheckBox(this@BlackListSettingsActivity).apply {
+                        text = "${app.label} ($pkg)"
+                        isChecked = selectedPackages.contains(pkg)
+                        setOnCheckedChangeListener { _, isChecked ->
+                            if (isChecked) selectedPackages.add(pkg) else selectedPackages.remove(pkg)
+                            headerView?.text = "Found ${appPackages.size} apps. Currently blacklisted: ${selectedPackages.size}"
+                        }
+                    }
+                    layout.addView(cb)
+                    checkboxes.add(cb)
+                }
+                loaded = true
             }
-            layout.addView(cb)
         }
+    }
 
-        val scroll = ScrollView(this).apply {
-            addView(layout)
+    private fun saveAndFinish() {
+        if (!loaded) { finish(); return }
+        if (selectedPackages == initialPackages) { finish(); return }
+        lifecycleScope.launch {
+            val profile = ProfileManager.getCurrentProfile(this@BlackListSettingsActivity)
+            val json = com.google.gson.Gson().toJson(selectedPackages.toList())
+            val ok = withContext(Dispatchers.IO) {
+                CloudSyncManager.patchAppListToCloud(this@BlackListSettingsActivity, profile, "blacklisted_apps", json)
+            }
+            withContext(Dispatchers.Main) {
+                if (ok) Toast.makeText(this@BlackListSettingsActivity, "Saved", Toast.LENGTH_SHORT).show()
+                else Toast.makeText(this@BlackListSettingsActivity, "Save failed", Toast.LENGTH_SHORT).show()
+                finish()
+            }
         }
-
-        setContentView(scroll)
-    }
-
-    private fun addToBlacklist(pkgName: String) {
-        BlacklistManager.addToBlacklist(this, pkgName)
-        // Sync to cloud
-        SettingsManager.syncAppListsToCloudAsync(this)
-    }
-
-    private fun removeFromBlacklist(pkgName: String) {
-        BlacklistManager.removeFromBlacklist(this, pkgName)
-        // Sync to cloud
-        SettingsManager.syncAppListsToCloudAsync(this)
-    }
-    
-    private fun clearAllBlacklist() {
-        BlacklistManager.clearAll(this)
-        // Sync to cloud
-        SettingsManager.syncAppListsToCloudAsync(this)
     }
 }

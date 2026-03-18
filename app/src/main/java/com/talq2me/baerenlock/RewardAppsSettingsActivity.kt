@@ -3,11 +3,13 @@ package com.talq2me.baerenlock
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.text.InputType
 import android.widget.*
-import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class RewardAppsSettingsActivity : AppCompatActivity() {
     private lateinit var appsListView: ListView
@@ -15,47 +17,47 @@ class RewardAppsSettingsActivity : AppCompatActivity() {
     private val appLabels = mutableListOf<String>()
     private val appPackages = mutableListOf<String>()
     private val selectedPackages = mutableSetOf<String>()
+    private var initialPackages = emptySet<String>()
+    private var loaded = false
+    private var loadingView: TextView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Set up the OnBackPressedCallback
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                SettingsManager.writeRewardApps(this@RewardAppsSettingsActivity, selectedPackages)
-                RewardManager.refreshRewardEligibleApps(this@RewardAppsSettingsActivity) // Refresh RewardManager
-                Toast.makeText(this@RewardAppsSettingsActivity, "Reward apps saved", Toast.LENGTH_SHORT).show()
-                finish()
-            }
+            override fun handleOnBackPressed() { saveAndFinish() }
         })
-        
+        val loadingTv = TextView(this).apply {
+            text = "Loading from database..."
+            setPadding(0, 0, 0, 24)
+        }
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 32)
-            addView(TextView(context).apply {
-                text = "Select Reward Apps"
-                textSize = 22f
-                setPadding(0, 0, 0, 24)
-            })
+            addView(loadingTv)
             appsListView = ListView(context)
             addView(appsListView)
         })
-        loadApps()
+        loadingView = loadingTv
+        lifecycleScope.launch {
+            val profile = ProfileManager.getCurrentProfile(this@RewardAppsSettingsActivity)
+            val fromCloud = withContext(Dispatchers.IO) { CloudSyncManager.fetchAppListsFromCloud(this@RewardAppsSettingsActivity, profile) }
+            val rewardFromDb = fromCloud?.rewardApps ?: emptySet()
+            initialPackages = rewardFromDb
+            selectedPackages.clear()
+            selectedPackages.addAll(rewardFromDb)
+            withContext(Dispatchers.Main) { loadAppsUi() }
+        }
     }
 
-    private fun loadApps() {
+    private fun loadAppsUi() {
         val pm = packageManager
         val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
-        val saved = SettingsManager.readRewardApps(this)
+            .filter { it.activityInfo.packageName != packageName }
         appLabels.clear()
         appPackages.clear()
-        selectedPackages.clear()
         for (ri in apps) {
-            val label = ri.loadLabel(pm).toString()
-            val pkg = ri.activityInfo.packageName
-            appLabels.add(label)
-            appPackages.add(pkg)
-            if (pkg in saved) selectedPackages.add(pkg)
+            appLabels.add(ri.loadLabel(pm).toString())
+            appPackages.add(ri.activityInfo.packageName)
         }
         adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_multiple_choice, appLabels) {
             override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
@@ -74,6 +76,26 @@ class RewardAppsSettingsActivity : AppCompatActivity() {
         appsListView.setOnItemClickListener { _, _, pos, _ ->
             val pkg = appPackages[pos]
             if (selectedPackages.contains(pkg)) selectedPackages.remove(pkg) else selectedPackages.add(pkg)
+        }
+        (loadingView?.parent as? android.view.ViewGroup)?.removeView(loadingView)
+        loadingView = null
+        loaded = true
+    }
+
+    private fun saveAndFinish() {
+        if (!loaded) { finish(); return }
+        if (selectedPackages == initialPackages) { finish(); return }
+        lifecycleScope.launch {
+            val profile = ProfileManager.getCurrentProfile(this@RewardAppsSettingsActivity)
+            val json = com.google.gson.Gson().toJson(selectedPackages.toList())
+            val ok = withContext(Dispatchers.IO) {
+                CloudSyncManager.patchAppListToCloud(this@RewardAppsSettingsActivity, profile, "reward_apps", json)
+            }
+            withContext(Dispatchers.Main) {
+                if (ok) Toast.makeText(this@RewardAppsSettingsActivity, "Saved", Toast.LENGTH_SHORT).show()
+                else Toast.makeText(this@RewardAppsSettingsActivity, "Save failed", Toast.LENGTH_SHORT).show()
+                finish()
+            }
         }
     }
 } 
