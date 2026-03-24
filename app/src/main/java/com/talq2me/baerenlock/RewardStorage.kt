@@ -18,7 +18,7 @@ object RewardStorage {
     @Volatile
     private var currentRewardMinutes: Int = 0
 
-    /** Reward time expiry in EST (yyyy-MM-dd HH:mm:ss.SSS). Null = no expiry (unlimited by time). */
+    /** Reward time expiry in America/Toronto (yyyy-MM-dd HH:mm:ss.SSS). Null = no expiry (unlimited by time). */
     @Volatile
     private var rewardTimeExpiry: String? = null
 
@@ -66,7 +66,21 @@ object RewardStorage {
      */
     fun saveRewardMinutes(context: Context, updateLastUpdated: Boolean = true, rewardTimeExpiryOptional: String? = null) {
         Log.d(TAG, "Saving reward minutes to cloud only: $currentRewardMinutes (online-only)")
-        CloudSyncManager.syncRewardMinutesToCloudAsync(context, currentRewardMinutes, skipTimestampCheck = true, rewardTimeExpiry = rewardTimeExpiryOptional ?: rewardTimeExpiry)
+        if (rewardTimeExpiryOptional != null) {
+            CloudSyncManager.syncRewardMinutesToCloudAsync(
+                context,
+                currentRewardMinutes,
+                skipTimestampCheck = true,
+                rewardTimeExpiry = rewardTimeExpiryOptional
+            )
+        } else {
+            // Read expiry when the sync runs so jobs queued before pause cannot restore stale reward_time_expiry.
+            CloudSyncManager.syncRewardMinutesToCloudAsyncReadExpiryAtExecution(
+                context,
+                currentRewardMinutes,
+                skipTimestampCheck = true
+            )
+        }
     }
     
     /**
@@ -84,9 +98,9 @@ object RewardStorage {
      */
     fun addRewardMinutes(context: Context, minutes: Int) {
         currentRewardMinutes += minutes
-        rewardTimeExpiry = CloudSyncManager.computeRewardTimeExpiryEst(context, currentRewardMinutes)
+        rewardTimeExpiry = null
         saveRewardMinutes(context)
-        Log.d(TAG, "Added $minutes reward minutes. New total: $currentRewardMinutes, expiry: $rewardTimeExpiry (pushed to cloud)")
+        Log.d(TAG, "Added $minutes reward minutes. New total: $currentRewardMinutes (pushed to cloud)")
     }
     
     /**

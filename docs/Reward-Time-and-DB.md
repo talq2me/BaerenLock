@@ -9,14 +9,14 @@
   `AppBlockerService` runs `checkAndUpdateRewardTime()` every 5 seconds → `RewardManager.performTimerCheck()` uses UsageStats to compute actual reward-app usage, decrements in-memory minutes, then calls `RewardStorage.saveRewardMinutes()` → `CloudSyncManager.syncRewardMinutesToCloudAsync()` → **PATCH** `user_data` with the new `banked_mins`.
 - So **each minute in a reward app** is reflected as a **decrease of `banked_mins` in the DB** via this PATCH path.
 
-## reward_time_expiry (EST)
+## reward_time_expiry (America/Toronto)
 
 To avoid unlimited reward time by accident, we store **when** reward time must be used by:
 
-- **DB:** `user_data.reward_time_expiry` (TIMESTAMP(3) NULL, same as other date/time columns). Stored in EST. Client sends `yyyy-MM-dd HH:mm:ss.SSS` (America/New_York).
+- **DB:** `user_data.reward_time_expiry` (TIMESTAMP(3) NULL, same as other date/time columns). Stored in Toronto time. Client sends `yyyy-MM-dd HH:mm:ss.SSS` (`America/Toronto`).
 - **Set when:**  
-  - Lock adds minutes (Intent from BaerenEd or manual add): expiry = now (EST) + new total minutes.  
-  - Lock starts the reward timer with minutes but no expiry (e.g. loaded only from cloud): expiry = now (EST) + current minutes.
+  - Lock adds minutes (Intent from BaerenEd or manual add): expiry = now (Toronto) + new total minutes.  
+  - Lock starts the reward timer with minutes but no expiry (e.g. loaded only from cloud): expiry = now (Toronto) + current minutes.
 - **Enforced:**  
   - Allow reward apps only if `banked_mins > 0` **and** (no expiry or current time ≤ expiry).  
   - If past expiry, treat as 0: block reward apps, set minutes to 0, clear expiry, sync to cloud.

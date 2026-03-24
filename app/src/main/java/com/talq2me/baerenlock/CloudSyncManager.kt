@@ -134,6 +134,91 @@ object CloudSyncManager {
     }
 
     /**
+     * Cloud state needed for reward-time control.
+     */
+    data class RewardTimeState(
+        val bankedMins: Int,
+        val rewardTimeExpiry: String?
+    )
+
+    /**
+     * Reads banked_mins and reward_time_expiry for the current profile.
+     */
+    suspend fun fetchRewardTimeState(context: Context): RewardTimeState? = withContext(Dispatchers.IO) {
+        if (!isConfigured(context)) return@withContext null
+        return@withContext try {
+            val profile = ProfileManager.getCurrentProfile(context)
+            val url = "${getSupabaseUrl(context)}/rest/v1/user_data?profile=eq.$profile&select=banked_mins,reward_time_expiry"
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .addHeader("apikey", getSupabaseKey(context))
+                .addHeader("Authorization", "Bearer ${getSupabaseKey(context)}")
+                .build()
+            val response = client.newCall(request).execute()
+            if (!response.isSuccessful) {
+                response.close()
+                return@withContext null
+            }
+            val body = response.body?.string() ?: "[]"
+            response.close()
+            if (body == "[]" || body == "{}") return@withContext RewardTimeState(0, null)
+            val rows = gson.fromJson(body, object : TypeToken<List<Map<String, Any?>>>() {}.type) as? List<Map<String, Any?>>
+            val row = rows?.firstOrNull() ?: return@withContext RewardTimeState(0, null)
+            val mins = (row["banked_mins"] as? Number)?.toInt() ?: 0
+            val expiry = row["reward_time_expiry"] as? String
+            RewardTimeState(mins, expiry)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching reward time state", e)
+            null
+        }
+    }
+
+    private suspend fun callRewardRpc(
+        context: Context,
+        functionName: String,
+        minutes: Int? = null
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!isConfigured(context)) return@withContext false
+        return@withContext try {
+            val profile = ProfileManager.getCurrentProfile(context)
+            val payload = if (minutes != null) {
+                mapOf("p_profile" to profile, "p_minutes" to minutes)
+            } else {
+                mapOf("p_profile" to profile)
+            }
+            val json = gson.toJson(payload)
+            val request = Request.Builder()
+                .url("${getSupabaseUrl(context)}/rest/v1/rpc/$functionName")
+                .post(json.toRequestBody("application/json".toMediaType()))
+                .addHeader("apikey", getSupabaseKey(context))
+                .addHeader("Authorization", "Bearer ${getSupabaseKey(context)}")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Prefer", "return=minimal")
+                .build()
+            val response = client.newCall(request).execute()
+            val ok = response.isSuccessful
+            if (!ok) {
+                val err = response.body?.string() ?: "Unknown error"
+                Log.e(TAG, "RPC $functionName failed: ${response.code} - $err")
+            }
+            response.close()
+            ok
+        } catch (e: Exception) {
+            Log.e(TAG, "Error calling RPC $functionName", e)
+            false
+        }
+    }
+
+    suspend fun useRewardTime(context: Context): Boolean = callRewardRpc(context, "use_reward_time")
+
+    suspend fun pauseRewardTime(context: Context): Boolean = callRewardRpc(context, "pause_reward_time")
+
+    suspend fun expireRewards(context: Context): Boolean = callRewardRpc(context, "expire_rewards")
+
+    suspend fun addRewardTime(context: Context, minutes: Int): Boolean = callRewardRpc(context, "add_reward_time", minutes)
+
+    /**
      * Loads settings from Supabase
      * Returns Pair of (SettingsData, cloudTimestamp) or null
      */
@@ -664,7 +749,7 @@ object CloudSyncManager {
                     }
                     
                     // Compare date part in EST only (per Daily Reset Logic)
-                    val estZone = java.util.TimeZone.getTimeZone("America/New_York")
+                    val estZone = java.util.TimeZone.getTimeZone("America/Toronto")
                     val today = Calendar.getInstance(estZone).apply {
                         set(Calendar.HOUR_OF_DAY, 0)
                         set(Calendar.MINUTE, 0)
@@ -1410,10 +1495,10 @@ object CloudSyncManager {
     
     /**
      * Generates EST timestamp in database format (no offset).
-     * System now() is UTC; we convert to EST for the DB. Format: yyyy-MM-dd HH:mm:ss.SSS (America/New_York).
+     * System now() is UTC; we convert to America/Toronto for the DB. Format: yyyy-MM-dd HH:mm:ss.SSS.
      */
     fun generateESTTimestamp(): String {
-        val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
+        val estTimeZone = java.util.TimeZone.getTimeZone("America/Toronto")
         val now = java.util.Date()
         val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
         dateFormat.timeZone = estTimeZone
@@ -1421,10 +1506,10 @@ object CloudSyncManager {
     }
 
     /**
-     * Computes reward_time_expiry as now (EST) + minutes. Format: yyyy-MM-dd HH:mm:ss.SSS (America/New_York).
+     * Computes reward_time_expiry as now (America/Toronto) + minutes. Format: yyyy-MM-dd HH:mm:ss.SSS.
      */
     fun computeRewardTimeExpiryEst(context: Context, minutesFromNow: Int): String {
-        val estTimeZone = java.util.TimeZone.getTimeZone("America/New_York")
+        val estTimeZone = java.util.TimeZone.getTimeZone("America/Toronto")
         val cal = java.util.Calendar.getInstance(estTimeZone)
         cal.add(java.util.Calendar.MINUTE, minutesFromNow)
         val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
@@ -1461,7 +1546,7 @@ object CloudSyncManager {
             }
             baseTimestamp = baseTimestamp.replace('T', ' ')
 
-            val estZone = java.util.TimeZone.getTimeZone("America/New_York")
+            val estZone = java.util.TimeZone.getTimeZone("America/Toronto")
             val formats = listOf(
                 "yyyy-MM-dd HH:mm:ss.SSS",
                 "yyyy-MM-dd HH:mm:ss.SS",
@@ -1511,7 +1596,7 @@ object CloudSyncManager {
             }
             baseTimestamp = baseTimestamp.replace('T', ' ')
 
-            val estZone = java.util.TimeZone.getTimeZone("America/New_York")
+            val estZone = java.util.TimeZone.getTimeZone("America/Toronto")
             val formats = listOf(
                 "yyyy-MM-dd HH:mm:ss.SSS",
                 "yyyy-MM-dd HH:mm:ss.SS",
@@ -1523,9 +1608,7 @@ object CloudSyncManager {
                     df.timeZone = estZone
                     val parsed = df.parse(baseTimestamp)
                     if (parsed != null) {
-                        val result = parsed.time
-                        Log.d(TAG, "parseTimestampForComparison: $timestamp -> base=$baseTimestamp -> $result (parsed as EST)")
-                        return result
+                        return parsed.time
                     }
                 } catch (_: Exception) {
                     // try next
@@ -1561,6 +1644,22 @@ object CloudSyncManager {
                 syncRewardMinutesToCloud(context, rewardMinutes, skipTimestampCheck, rewardTimeExpiry)
             } catch (e: Exception) {
                 Log.w(TAG, "Could not sync reward minutes to cloud: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Like [syncRewardMinutesToCloudAsync] but reads [RewardStorage.getRewardTimeExpiry] when the coroutine runs.
+     * Enqueued saves must not capture expiry at enqueue time — after pause, a stale job could otherwise PATCH the old
+     * [reward_time_expiry] back and undo [pause_reward_time].
+     */
+    fun syncRewardMinutesToCloudAsyncReadExpiryAtExecution(context: Context, rewardMinutes: Int, skipTimestampCheck: Boolean = false) {
+        syncScope.launch {
+            try {
+                val expiry = RewardStorage.getRewardTimeExpiry()
+                syncRewardMinutesToCloud(context, rewardMinutes, skipTimestampCheck, rewardTimeExpiry = expiry)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not sync reward minutes to cloud (deferred expiry read): ${e.message}")
             }
         }
     }

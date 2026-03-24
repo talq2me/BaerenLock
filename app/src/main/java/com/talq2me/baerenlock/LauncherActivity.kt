@@ -41,6 +41,8 @@ class LauncherActivity : AppCompatActivity() {
     private var lastDisplayedRewardMinutes: Int = -1 // Track last displayed value to avoid unnecessary updates
     private lateinit var prefs: SharedPreferences
     private var rewardMinutesTextView: TextView? = null
+    private var useRewardButton: Button? = null
+    private var pauseRewardButton: Button? = null
     private var backgroundImageView: ImageView? = null
     private var internetIndicatorButton: Button? = null
 
@@ -56,8 +58,7 @@ class LauncherActivity : AppCompatActivity() {
                 updateRewardMinutesDisplay()
             } else if (intent?.action == RewardTimeReceiver.ACTION_REWARD_TIME_UPDATED) {
                 Log.d(TAG, "Received ACTION_REWARD_TIME_UPDATED broadcast. Refreshing UI.")
-                RewardManager.loadRewardMinutes(this@LauncherActivity)
-                updateRewardMinutesDisplay()
+                refreshRewardStateAndUi()
             }
         }
     }
@@ -188,10 +189,7 @@ class LauncherActivity : AppCompatActivity() {
                 view.isEnabled = false
                 SettingsManager.runResetThenDownload(this@LauncherActivity) {
                     RewardManager.loadRewardMinutes(this@LauncherActivity)
-                    if (RewardManager.currentRewardMinutes > 0) {
-                        RewardManager.startRewardTimer(this@LauncherActivity)
-                    }
-                    updateRewardMinutesDisplay()
+                    refreshRewardStateAndUi()
                     if (::appGrid.isInitialized) refreshIcons(appGrid)
                     refreshBackgroundImage()
                     updateInternetIndicatorState()
@@ -228,6 +226,44 @@ class LauncherActivity : AppCompatActivity() {
             )
         }
         topBar.addView(rewardMinutesTextView)
+
+        useRewardButton = Button(this).apply {
+            textSize = 14f
+            setTextColor(resources.getColor(android.R.color.white, null))
+            layoutParams = LinearLayout.LayoutParams(
+                180.dpToPx(),
+                (32 * resources.displayMetrics.density).toInt()
+            ).apply {
+                marginEnd = 12.dpToPx()
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            background = resources.getDrawable(R.drawable.button_rounded_success, null)
+            setPadding(8.dpToPx(), 4.dpToPx(), 8.dpToPx(), 4.dpToPx())
+            gravity = Gravity.CENTER
+            text = "Use Reward Time"
+            setOnClickListener { onUseRewardClicked() }
+            visibility = View.GONE
+        }
+        topBar.addView(useRewardButton)
+
+        pauseRewardButton = Button(this).apply {
+            textSize = 14f
+            setTextColor(resources.getColor(android.R.color.white, null))
+            layoutParams = LinearLayout.LayoutParams(
+                180.dpToPx(),
+                (32 * resources.displayMetrics.density).toInt()
+            ).apply {
+                marginEnd = 12.dpToPx()
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            background = resources.getDrawable(R.drawable.button_rounded_success, null)
+            setPadding(8.dpToPx(), 4.dpToPx(), 8.dpToPx(), 4.dpToPx())
+            gravity = Gravity.CENTER
+            text = "Pause Reward Time"
+            setOnClickListener { onPauseRewardClicked() }
+            visibility = View.GONE
+        }
+        topBar.addView(pauseRewardButton)
 
         val breakGlassButton = ImageButton(this).apply {
             setImageResource(R.drawable.exit_launcher)
@@ -276,6 +312,7 @@ class LauncherActivity : AppCompatActivity() {
         // Check for reward minutes from intent
         processIncomingRewardMinutes(intent)
 
+        refreshRewardStateAndUi()
         refreshIcons(appGrid)
         startRewardDisplayUpdate()
     }
@@ -305,10 +342,7 @@ class LauncherActivity : AppCompatActivity() {
         Log.d(TAG, "Running reset-then-download before syncing (onResume)")
         SettingsManager.runResetThenDownload(this) {
             RewardManager.loadRewardMinutes(this@LauncherActivity)
-            if (RewardManager.currentRewardMinutes > 0) {
-                RewardManager.startRewardTimer(this@LauncherActivity)
-            }
-            updateRewardMinutesDisplay()
+            refreshRewardStateAndUi()
             refreshIcons(appGrid)
         }
         
@@ -367,7 +401,7 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun updateRewardMinutesDisplay() {
-        val minutes = RewardManager.getEffectiveRewardMinutes(this)
+        val minutes = RewardManager.getDisplayRewardMinutes(this)
         runOnUiThread {
             // Only update text if it changed (avoid unnecessary UI updates)
             if (minutes != lastDisplayedRewardMinutes) {
@@ -384,8 +418,126 @@ class LauncherActivity : AppCompatActivity() {
                 
                 lastDisplayedRewardMinutes = minutes
             }
+            updateRewardActionButton()
             // Don't refresh icons every second - only refresh when apps list actually changes
             // refreshIcons() is expensive (rebuilds entire grid) and doesn't need to run every second
+        }
+    }
+
+    private fun refreshRewardStateAndUi() {
+        lifecycleScope.launch {
+            val state = withContext(Dispatchers.IO) { CloudSyncManager.fetchRewardTimeState(this@LauncherActivity) }
+            if (state != null) {
+                RewardManager.currentRewardMinutes = state.bankedMins
+                RewardStorage.setRewardTimeExpiry(state.rewardTimeExpiry)
+            }
+            updateRewardMinutesDisplay()
+        }
+    }
+
+    private fun updateRewardActionButton() {
+        val useButton = useRewardButton
+        val pauseButton = pauseRewardButton
+        if (useButton == null || pauseButton == null) return
+        val active = RewardManager.isRewardSessionActive()
+        val hasBanked = RewardManager.currentRewardMinutes > 0
+        when {
+            active -> {
+                pauseButton.isEnabled = true
+                pauseButton.visibility = View.VISIBLE
+                useButton.visibility = View.GONE
+            }
+            hasBanked -> {
+                useButton.isEnabled = true
+                useButton.visibility = View.VISIBLE
+                pauseButton.visibility = View.GONE
+            }
+            else -> {
+                useButton.isEnabled = true
+                pauseButton.isEnabled = true
+                useButton.visibility = View.GONE
+                pauseButton.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun onUseRewardClicked() {
+        val button = useRewardButton
+        button?.isEnabled = false
+        button?.text = "Working..."
+        lifecycleScope.launch {
+            try {
+                val ok = withContext(Dispatchers.IO) {
+                    CloudSyncManager.useRewardTime(this@LauncherActivity)
+                }
+                if (!ok) {
+                    Toast.makeText(this@LauncherActivity, "Could not update reward session", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                try {
+                    withContext(Dispatchers.IO) {
+                        RewardManager.performTimerCheckSuspend(this@LauncherActivity)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "reward sync after RPC failed", e)
+                    Toast.makeText(this@LauncherActivity, "Could not sync reward state", Toast.LENGTH_SHORT).show()
+                }
+
+                RewardManager.refreshRewardEligibleApps(this@LauncherActivity)
+                updateRewardMinutesDisplay()
+                // Restore clickability before heavy grid rebuild so the button never stays stuck on "Working..."
+                updateRewardActionButton()
+                try {
+                    refreshIcons(appGrid)
+                } catch (e: Exception) {
+                    Log.e(TAG, "refreshIcons failed", e)
+                }
+            } finally {
+                button?.text = "Use Reward Time"
+                button?.isEnabled = true
+                updateRewardActionButton()
+            }
+        }
+    }
+
+    private fun onPauseRewardClicked() {
+        val button = pauseRewardButton
+        val localRemainingWhenPaused = RewardManager.getDisplayRewardMinutes(this)
+        button?.isEnabled = false
+        button?.text = "Working..."
+        lifecycleScope.launch {
+            try {
+                val ok = withContext(Dispatchers.IO) {
+                    CloudSyncManager.pauseRewardTime(this@LauncherActivity)
+                }
+                if (!ok) {
+                    Toast.makeText(this@LauncherActivity, "Could not update reward session", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                try {
+                    withContext(Dispatchers.IO) {
+                        RewardManager.applyPauseRewardFromRpcSuccess(this@LauncherActivity, localRemainingWhenPaused)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "reward sync after RPC failed", e)
+                    Toast.makeText(this@LauncherActivity, "Could not sync reward state", Toast.LENGTH_SHORT).show()
+                }
+
+                RewardManager.refreshRewardEligibleApps(this@LauncherActivity)
+                updateRewardMinutesDisplay()
+                updateRewardActionButton()
+                try {
+                    refreshIcons(appGrid)
+                } catch (e: Exception) {
+                    Log.e(TAG, "refreshIcons failed", e)
+                }
+            } finally {
+                button?.text = "Pause Reward Time"
+                button?.isEnabled = true
+                updateRewardActionButton()
+            }
         }
     }
 
@@ -947,32 +1099,18 @@ class LauncherActivity : AppCompatActivity() {
                 val minutes = minutesText.toIntOrNull()
                 
                 if (minutes != null && minutes > 0) {
-                    // Load current reward minutes
-                    RewardManager.loadRewardMinutes(this)
-                    
-                    // Add the new reward minutes and set reward_time_expiry (now_est + new total)
-                    RewardManager.currentRewardMinutes += minutes
-                    RewardStorage.setRewardTimeExpiry(CloudSyncManager.computeRewardTimeExpiryEst(this, RewardManager.currentRewardMinutes))
-                    RewardManager.saveRewardMinutes(this)
-                    
-                    // Update start minutes for usage-based tracking
-                    RewardManager.updateStartMinutesForNewRewardTime(this, minutes)
-                    
-                    // Start timer if not already running
-                    if (RewardManager.currentRewardMinutes > 0) {
-                        RewardManager.startRewardTimer(this)
+                    lifecycleScope.launch {
+                        val ok = withContext(Dispatchers.IO) { CloudSyncManager.addRewardTime(this@LauncherActivity, minutes) }
+                        if (!ok) {
+                            Toast.makeText(this@LauncherActivity, "Failed to add reward time", Toast.LENGTH_SHORT).show()
+                            return@launch
+                        }
+                        refreshRewardStateAndUi()
+                        refreshIcons(appGrid)
+                        Toast.makeText(this@LauncherActivity, "Added $minutes reward minutes", Toast.LENGTH_SHORT).show()
+                        Log.d(TAG, "Added $minutes reward minutes via add_reward_time RPC")
+                        dialog.dismiss()
                     }
-                    
-                    // Update the display
-                    updateRewardMinutesDisplay()
-                    
-                    // Refresh icons to show reward apps
-                    refreshIcons(appGrid)
-                    
-                    Toast.makeText(this, "Added $minutes reward minutes. Total: ${RewardManager.currentRewardMinutes} minutes", Toast.LENGTH_SHORT).show()
-                    Log.d(TAG, "Manually added $minutes reward minutes. Total: ${RewardManager.currentRewardMinutes} minutes")
-                    
-                    dialog.dismiss()
                 } else {
                     Toast.makeText(this, "Please enter a valid number of minutes (greater than 0)", Toast.LENGTH_SHORT).show()
                 }
@@ -1245,7 +1383,7 @@ class LauncherActivity : AppCompatActivity() {
             RewardManager.loadRewardMinutes(this)
             val previousMinutes = RewardManager.currentRewardMinutes
             RewardManager.currentRewardMinutes += incomingRewardMinutes
-            RewardStorage.setRewardTimeExpiry(CloudSyncManager.computeRewardTimeExpiryEst(this, RewardManager.currentRewardMinutes))
+            RewardStorage.setRewardTimeExpiry(null)
             RewardManager.saveRewardMinutes(this)
             
             // Update start minutes for usage-based tracking
@@ -1260,17 +1398,14 @@ class LauncherActivity : AppCompatActivity() {
             
             Log.d(TAG, "Successfully added $incomingRewardMinutes minutes from Intent. Previous: $previousMinutes, New total: ${RewardManager.currentRewardMinutes} minutes")
             
-            // Start timer if not already running
-            if (RewardManager.currentRewardMinutes > 0) {
-                RewardManager.startRewardTimer(this)
-            }
+            // Reward time is now explicitly started by pressing "Use Reward Time".
         } else if (incomingRewardMinutes > 0 && transactionId == 0L) {
             // Legacy support: if no transaction ID, process it but log a warning
             Log.w(TAG, "Received reward minutes without transaction ID (legacy format). Processing anyway.")
             RewardManager.loadRewardMinutes(this)
             val previousMinutes = RewardManager.currentRewardMinutes
             RewardManager.currentRewardMinutes += incomingRewardMinutes
-            RewardStorage.setRewardTimeExpiry(CloudSyncManager.computeRewardTimeExpiryEst(this, RewardManager.currentRewardMinutes))
+            RewardStorage.setRewardTimeExpiry(null)
             RewardManager.saveRewardMinutes(this)
             
             // Update start minutes for usage-based tracking
@@ -1281,9 +1416,7 @@ class LauncherActivity : AppCompatActivity() {
             
             Log.d(TAG, "Legacy format: Added $incomingRewardMinutes minutes. Previous: $previousMinutes, New total: ${RewardManager.currentRewardMinutes} minutes")
             
-            if (RewardManager.currentRewardMinutes > 0) {
-                RewardManager.startRewardTimer(this)
-            }
+            // Reward time is now explicitly started by pressing "Use Reward Time".
         } else {
             Log.d(TAG, "No valid reward minutes in Intent (rewardMinutes=$incomingRewardMinutes, transactionId=$transactionId)")
         }

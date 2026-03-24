@@ -50,11 +50,6 @@ class RewardTimeReceiver : BroadcastReceiver() {
                 // Mark this transaction as processed
                 RewardManager.markTransactionProcessed(context, transactionId)
                 
-                // Start timer if not already running
-                if (RewardManager.currentRewardMinutes > 0) {
-                    RewardManager.startRewardTimer(context)
-                }
-                
                 Log.d(TAG, "Successfully added $rewardMinutes minutes. Previous: $previousMinutes, New total: ${RewardManager.currentRewardMinutes} minutes")
                 
                 // Send local broadcast to update UI
@@ -70,10 +65,6 @@ class RewardTimeReceiver : BroadcastReceiver() {
                 
                 // Update start minutes for usage-based tracking
                 RewardManager.updateStartMinutesForNewRewardTime(context, rewardMinutes)
-                
-                if (RewardManager.currentRewardMinutes > 0) {
-                    RewardManager.startRewardTimer(context)
-                }
                 
                 Log.d(TAG, "Legacy format: Added $rewardMinutes minutes. Previous: $previousMinutes, New total: ${RewardManager.currentRewardMinutes} minutes")
                 

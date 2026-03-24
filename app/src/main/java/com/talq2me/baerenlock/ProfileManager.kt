@@ -99,7 +99,7 @@ object ProfileManager {
         val parsedMillis = CloudSyncManager.parseTimestampForComparison(timestamp)
         if (parsedMillis <= 0L) return timestamp
 
-        val estZone = java.util.TimeZone.getTimeZone("America/New_York")
+        val estZone = java.util.TimeZone.getTimeZone("America/Toronto")
         val df = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
         df.timeZone = estZone
         return df.format(java.util.Date(parsedMillis))

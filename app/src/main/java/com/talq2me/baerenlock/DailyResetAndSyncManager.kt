@@ -180,7 +180,7 @@ object DailyResetAndSyncManager {
      */
     private fun isTodayInEST(timestamp: String?): Boolean {
         if (timestamp.isNullOrEmpty()) return false
-        val estZone = TimeZone.getTimeZone("America/New_York")
+        val estZone = TimeZone.getTimeZone("America/Toronto")
         val resetDate = parseLastResetToDate(timestamp.trim()) ?: run {
             Log.e(TAG, "Could not parse last_reset (treat as not today): $timestamp")
             return false
@@ -196,7 +196,7 @@ object DailyResetAndSyncManager {
      */
     private fun parseLastResetToDate(timestamp: String): Date? {
         val trimmed = timestamp.trim()
-        val estZone = TimeZone.getTimeZone("America/New_York")
+        val estZone = TimeZone.getTimeZone("America/Toronto")
         return try {
             if (!trimmed.contains("T")) {
                 SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).apply { timeZone = estZone }.parse(trimmed)
@@ -398,7 +398,7 @@ object DailyResetAndSyncManager {
         val all = targetPrefs.all
         if (all.isEmpty()) return
 
-        val estZone = TimeZone.getTimeZone("America/New_York")
+        val estZone = TimeZone.getTimeZone("America/Toronto")
         val outputFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).apply {
             timeZone = estZone
         }
@@ -454,7 +454,7 @@ object DailyResetAndSyncManager {
             }
             baseTimestamp = baseTimestamp.replace('T', ' ')
 
-            val estZone = TimeZone.getTimeZone("America/New_York")
+            val estZone = TimeZone.getTimeZone("America/Toronto")
             val formats = listOf(
                 "yyyy-MM-dd HH:mm:ss.SSS",
                 "yyyy-MM-dd HH:mm:ss.SS",
@@ -478,11 +478,11 @@ object DailyResetAndSyncManager {
     }
     
     /**
-     * System now() is UTC; we convert to EST. Format: yyyy-MM-dd HH:mm:ss.SSS (America/New_York).
+     * System now() is UTC; we convert to America/Toronto. Format: yyyy-MM-dd HH:mm:ss.SSS.
      */
     private fun generateESTTimestampString(): String {
         val timestampFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
-        timestampFormat.timeZone = TimeZone.getTimeZone("America/New_York")
+        timestampFormat.timeZone = TimeZone.getTimeZone("America/Toronto")
         return timestampFormat.format(Date())
     }
     
@@ -511,12 +511,12 @@ object DailyResetAndSyncManager {
             }
             
             val parseFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.getDefault())
-            parseFormat.timeZone = TimeZone.getTimeZone("America/New_York")
+            parseFormat.timeZone = TimeZone.getTimeZone("America/Toronto")
             val parsedDate = parseFormat.parse(baseTimestamp)
             
             if (parsedDate != null) {
                 val outputFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
-                outputFormat.timeZone = TimeZone.getTimeZone("America/New_York")
+                outputFormat.timeZone = TimeZone.getTimeZone("America/Toronto")
                 outputFormat.format(parsedDate)
             } else {
                 generateESTTimestampString()

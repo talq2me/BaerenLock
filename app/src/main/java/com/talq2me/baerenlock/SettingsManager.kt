@@ -165,7 +165,7 @@ object SettingsManager {
         } else if (shouldSyncLocalToCloud && localTimestamp.isNullOrEmpty()) {
             val estTimestamp = CloudSyncManager.generateESTTimestamp()
             prefs.edit().putString("settings_timestamp", estTimestamp).apply()
-            Log.d(TAG, "Set initial settings timestamp in EST ($estTimestamp)")
+            Log.d(TAG, "Set initial settings timestamp in America/Toronto ($estTimestamp)")
         }
         
         // If we kept local value and it differs from cloud, sync local to cloud

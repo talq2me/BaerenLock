@@ -15,6 +15,8 @@ import com.talq2me.baerenlock.LauncherActivity
 import java.util.Calendar
 import android.os.Build
 import android.app.AppOpsManager
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 
 object RewardManager {
     private const val TAG = "RewardManager"
@@ -25,14 +27,31 @@ object RewardManager {
         set(value) = RewardStorage.setCurrentRewardMinutes(value)
 
     /**
-     * Effective reward minutes: 0 if reward_time_expiry is set and current time is past it; otherwise current minutes.
-     * Use this for "can use reward apps" and blocking logic.
+     * Effective reward minutes are only available during an active reward session.
+     * A session is active only when reward_time_expiry exists and is in the future.
      */
     fun getEffectiveRewardMinutes(context: Context): Int {
-        if (CloudSyncManager.isAfterRewardTimeExpiry(RewardStorage.getRewardTimeExpiry())) {
+        if (!isRewardSessionActive()) {
             return 0
         }
-        return currentRewardMinutes
+        return getRemainingSessionMinutes()
+    }
+
+    fun getDisplayRewardMinutes(context: Context): Int {
+        return if (isRewardSessionActive()) getRemainingSessionMinutes() else currentRewardMinutes
+    }
+
+    fun isRewardSessionActive(): Boolean {
+        val expiry = RewardStorage.getRewardTimeExpiry()
+        return !expiry.isNullOrBlank() && !CloudSyncManager.isAfterRewardTimeExpiry(expiry)
+    }
+
+    private fun getRemainingSessionMinutes(): Int {
+        val expiry = RewardStorage.getRewardTimeExpiry() ?: return 0
+        val expiryMs = CloudSyncManager.parseTimestampForComparison(expiry)
+        val remainingMs = expiryMs - System.currentTimeMillis()
+        if (remainingMs <= 0L) return 0
+        return ((remainingMs + 59_999L) / 60_000L).toInt()
     }
     
     private var rewardTimer: Handler? = null
@@ -95,7 +114,7 @@ object RewardManager {
     }
 
     fun isAllowed(pkg: String): Boolean {
-        return RewardAppsManager.isAllowed(pkg, currentRewardMinutes)
+        return RewardAppsManager.isAllowed(pkg, isRewardSessionActive())
     }
 
     fun addToWhitelist(pkg: String, context: Context) {
@@ -266,10 +285,7 @@ object RewardManager {
     }
 
     fun loadRewardMinutes(context: Context) {
-        val wasLoaded = RewardStorage.loadRewardMinutes(context)
-        if (currentRewardMinutes > 0) {
-            startRewardTimer(context)
-        }
+        RewardStorage.loadRewardMinutes(context)
     }
 
     /**
@@ -389,137 +405,90 @@ object RewardManager {
     }
     
     /**
+     * Call after [pause_reward_time] RPC succeeds. Clears active session in UI immediately, then retries fetch
+     * until DB shows no expiry (or gives up). Never uses the "still in session" early-return path that kept the
+     * launcher button stuck on "Pause Reward Time" when reads were stale.
+     *
+     * @param localBankedRemainingAfterPause Remaining session minutes shown when the user tapped Pause (banked value after pause).
+     *        Used for an authoritative PATCH so DB cannot stay "active" if RPC was a no-op or a stale async save restored expiry.
+     */
+    suspend fun applyPauseRewardFromRpcSuccess(context: Context, localBankedRemainingAfterPause: Int) {
+        val banked = localBankedRemainingAfterPause.coerceAtLeast(0)
+        RewardStorage.setRewardTimeExpiry(null)
+        currentRewardMinutes = banked
+        val patched = CloudSyncManager.syncRewardMinutesToCloud(
+            context,
+            rewardMinutes = banked,
+            skipTimestampCheck = true,
+            rewardTimeExpiry = null
+        )
+        if (!patched) {
+            Log.w(TAG, "applyPauseRewardFromRpcSuccess: forced banked+null-expiry PATCH failed (will still retry fetch)")
+        }
+        for (attempt in 0 until 8) {
+            val s = CloudSyncManager.fetchRewardTimeState(context) ?: return
+            currentRewardMinutes = s.bankedMins
+            if (s.rewardTimeExpiry.isNullOrBlank()) {
+                RewardStorage.setRewardTimeExpiry(null)
+                Log.d(TAG, "applyPauseRewardFromRpcSuccess: synced paused state (attempt ${attempt + 1})")
+                RewardAppsManager.clearTemporaryApps(context)
+                endRewardSessionTracking()
+                notifyRewardTimeChanged(context)
+                return
+            }
+            delay(200)
+        }
+        CloudSyncManager.fetchRewardTimeState(context)?.let { s ->
+            currentRewardMinutes = s.bankedMins
+        }
+        RewardStorage.setRewardTimeExpiry(null)
+        RewardAppsManager.clearTemporaryApps(context)
+        endRewardSessionTracking()
+        notifyRewardTimeChanged(context)
+        Log.w(TAG, "applyPauseRewardFromRpcSuccess: DB still showed expiry after retries; UI forced paused")
+    }
+
+    /**
+     * Syncs reward state from Supabase and applies session / pause / expiry side effects.
+     * Call from [performTimerCheck] (background) or Launcher "Use reward time" path via withContext(IO).
+     */
+    suspend fun performTimerCheckSuspend(context: Context) {
+        val previouslyActive = isRewardSessionActive()
+        var cloudState = CloudSyncManager.fetchRewardTimeState(context) ?: return
+        currentRewardMinutes = cloudState.bankedMins
+        RewardStorage.setRewardTimeExpiry(cloudState.rewardTimeExpiry)
+        if (isRewardSessionActive()) {
+            startRewardSessionTracking(context)
+            notifyRewardTimeChanged(context)
+            return
+        }
+        if (!cloudState.rewardTimeExpiry.isNullOrBlank()) {
+            Log.d(TAG, "Reward session expired in cloud, calling expire_rewards")
+            CloudSyncManager.expireRewards(context)
+            RewardStorage.setRewardTimeExpiry(null)
+        }
+        // Do NOT treat "pause" like natural expiry: pause_reward_time leaves banked_mins > 0 and expiry null.
+        // Calling handleRewardTimeExpired here would returnToLauncher(CLEAR_TASK), destroy the launcher mid-flow,
+        // and leave the reward button stuck disabled ("Working...") on the next Use Reward Time.
+        val pausedWithBanked =
+            cloudState.rewardTimeExpiry.isNullOrBlank() && cloudState.bankedMins > 0
+        if ((previouslyActive || rewardSessionActive) && !pausedWithBanked) {
+            handleRewardTimeExpired(context)
+        } else if (pausedWithBanked && previouslyActive) {
+            // Pause: end tracking and clear temp access without nuking the launcher (full expiry handler does).
+            RewardAppsManager.clearTemporaryApps(context)
+            endRewardSessionTracking()
+            Log.d(TAG, "Session paused (banked > 0): cleared temp apps and ended usage tracking")
+        }
+        notifyRewardTimeChanged(context)
+    }
+
+    /**
      * Performs a single timer check iteration - called from AppBlockerService background thread.
-     * This allows the reward timer to run even when BaerenLock is in the background.
      */
     fun performTimerCheck(context: Context) {
-        // Enforce reward_time_expiry: if past expiry, treat as 0 and sync
-        if (CloudSyncManager.isAfterRewardTimeExpiry(RewardStorage.getRewardTimeExpiry())) {
-            if (currentRewardMinutes > 0) {
-                Log.d(TAG, "Reward time expired by reward_time_expiry; setting minutes to 0 and syncing")
-                currentRewardMinutes = 0
-                RewardStorage.setRewardTimeExpiry(null)
-                RewardStorage.saveRewardMinutes(context)
-                handleRewardTimeExpired(context)
-            }
-            return
-        }
-        // Only check if we have reward minutes
-        if (currentRewardMinutes <= 0) {
-            // No reward time - ensure timer state is reset
-            if (rewardTimeStartTime != 0L) {
-                Log.d(TAG, "No reward minutes, resetting timer state")
-                rewardTimeStartTime = 0L
-                rewardTimeStartMinutes = 0
-                lastUsageCheckTime = 0L
-                lastPeriodicSaveLogTime = 0L
-                lastRewardDecrementTime = 0L
-            }
-            return
-        }
-        
-        val now = System.currentTimeMillis()
-        val oneMinuteInMillis = 60 * 1000L
-        var shouldSave = false
-        var valueChanged = false // Track if value actually changed (for last_updated timestamp)
-        
-        // Initialize timer state if this is the first check
-        if (rewardTimeStartTime == 0L) {
-            rewardTimeStartTime = now
-            rewardTimeStartMinutes = currentRewardMinutes
-            lastUsageCheckTime = now
-            lastRewardDecrementTime = now
-            Log.d(TAG, "Initialized reward timer state: startTime=$now, startMinutes=$rewardTimeStartMinutes")
-            
-            // Start reward session tracking for usage reporting
-            startRewardSessionTracking(context)
-        }
-        
-        // Use UsageStatsManager to track actual usage time (only counts time when reward apps are in foreground)
-        val timeSinceStart = now - rewardTimeStartTime
-        
-        if (hasUsageStatsPermission(context)) {
-            // Wait at least 30 seconds before checking UsageStats to avoid historical data
-            val minimumTimeForUsageCheck = 30 * 1000L
-            
-            if (timeSinceStart >= minimumTimeForUsageCheck) {
-                val actualUsageMinutes = getActualRewardAppUsageMinutes(context, rewardTimeStartTime, now)
-                
-                // Use ONLY actual usage time (which only counts time when reward apps are in foreground)
-                val usageBasedRemaining = rewardTimeStartMinutes - actualUsageMinutes
-                val newCurrentMinutes = usageBasedRemaining.coerceAtLeast(0)
-                
-                // Only decrement if:
-                // 1. The value actually changed
-                // 2. At least 60 seconds have passed since last decrement (prevents multiple decrements per minute)
-                // 3. We've actually used at least 1 minute (prevents decrementing due to historical UsageStats data)
-                val timeSinceLastDecrement = now - lastRewardDecrementTime
-                val hasUsedAtLeastOneMinute = actualUsageMinutes >= 1
-                val canDecrement = (newCurrentMinutes != currentRewardMinutes) && 
-                                   (timeSinceLastDecrement >= oneMinuteInMillis) && 
-                                   hasUsedAtLeastOneMinute
-                
-                if (canDecrement) {
-                    Log.d(TAG, "UsageStats: actualUsage=$actualUsageMinutes min, updating from $currentRewardMinutes to $newCurrentMinutes minutes")
-                    currentRewardMinutes = newCurrentMinutes
-                    shouldSave = true
-                    valueChanged = true // Value actually changed
-                    lastUsageCheckTime = now
-                    lastRewardDecrementTime = now
-                    
-                    // CRITICAL: Reset baseline when we decrement so future calculations are based on new value
-                    // This ensures we continue decrementing properly (e.g., 5->4->3->2->1->0)
-                    // We've already verified actualUsageMinutes >= 1 in canDecrement check
-                    rewardTimeStartTime = now
-                    rewardTimeStartMinutes = newCurrentMinutes
-                    Log.d(TAG, "Reset timer baseline: startTime=$now, startMinutes=$newCurrentMinutes (after $actualUsageMinutes min usage)")
-                    
-                    // Notify LauncherActivity if reward time changed
-                    notifyRewardTimeChanged(context)
-                } else {
-                    // Even if value hasn't changed, save periodically (every minute) as safety net
-                    val timeSinceLastSave = now - lastUsageCheckTime
-                    if (timeSinceLastSave >= oneMinuteInMillis) {
-                        shouldSave = true
-                        valueChanged = false // Periodic save, value didn't change
-                        lastUsageCheckTime = now
-                        // Only log periodic saves every 5 minutes to reduce log spam
-                        if (now - lastPeriodicSaveLogTime >= 5 * oneMinuteInMillis) {
-                            Log.d(TAG, "Periodic save (UsageStats): current=$currentRewardMinutes minutes")
-                            lastPeriodicSaveLogTime = now
-                        }
-                    }
-                }
-            } else {
-                // Too soon for UsageStats - don't decrement yet (prevents counting time on launcher)
-                // Just save periodically to ensure state is saved
-                val timeSinceLastSave = now - lastUsageCheckTime
-                if (timeSinceLastSave >= oneMinuteInMillis) {
-                    shouldSave = true
-                    valueChanged = false // Periodic save, value didn't change
-                    lastUsageCheckTime = now
-                }
-            }
-        } else {
-            // CRITICAL: Without UsageStats permission, we can't track time accurately
-            // Log this warning periodically (every 30 seconds) to avoid log spam
-            val timeSinceLastSave = now - lastUsageCheckTime
-            if (timeSinceLastSave >= 30 * 1000L) {
-                Log.e(TAG, "⚠️ CRITICAL: UsageStats permission NOT granted! Reward timer cannot decrement. Grant permission in Settings > Apps > BaerenLock > Permissions > Usage access")
-                lastUsageCheckTime = now
-            }
-            // Don't decrement without UsageStats permission since we can't determine foreground state accurately
-        }
-        
-        // Save to local storage if we need to
-        // Only update last_updated if value actually changed (for periodic saves, don't update timestamp)
-        if (shouldSave) {
-            saveRewardMinutes(context, updateLastUpdated = valueChanged)
-        }
-        
-        // Check if reward time has expired
-        if (currentRewardMinutes == 0) {
-            handleRewardTimeExpired(context)
+        runBlocking {
+            performTimerCheckSuspend(context)
         }
     }
     

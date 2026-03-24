@@ -52,10 +52,17 @@ class AppBlockerService : AccessibilityService() {
 
     private val rewardTimerCheck = object : Runnable {
         override fun run() {
-            // Check and update reward time - this runs even when BaerenLock is in background
-            checkAndUpdateRewardTime()
-            // Schedule next check - every 5 seconds for accurate tracking
-            backgroundHandler.postDelayed(this, 5000)
+            val shouldCheckRewardState =
+                RewardManager.isRewardSessionActive() || RewardManager.currentRewardMinutes > 0
+            if (shouldCheckRewardState) {
+                // Only sync reward state while reward mode is active or banked minutes exist.
+                checkAndUpdateRewardTime()
+                // Active/banked reward state: keep a minute cadence.
+                backgroundHandler.postDelayed(this, 60_000)
+            } else {
+                // No reward mode in play: back off cloud checks.
+                backgroundHandler.postDelayed(this, 5 * 60_000)
+            }
         }
     }
 
@@ -170,9 +177,9 @@ class AppBlockerService : AccessibilityService() {
         // Start background app cleanup
         backgroundHandler.post(backgroundCleanupCheck)
         
-        // Start reward timer check (runs every 5 seconds even when BaerenLock is in background)
+        // Start reward session state check (runs every minute even in background)
         backgroundHandler.post(rewardTimerCheck)
-        Log.d("AppBlocker", "Started background reward timer check (every 5 seconds)")
+        Log.d("AppBlocker", "Started background reward check (every 60 seconds)")
         
         // Start health check monitoring
         lastEventTime = System.currentTimeMillis()

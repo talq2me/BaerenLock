@@ -55,12 +55,12 @@ object RewardAppsManager {
     /**
      * Checks if an app is allowed (whitelisted, temporary, or reward-eligible with active minutes)
      */
-    fun isAllowed(pkg: String, currentRewardMinutes: Int): Boolean {
+    fun isAllowed(pkg: String, rewardSessionActive: Boolean): Boolean {
         // An app is allowed if it's permanently whitelisted, temporarily allowed, OR
         // if it's a reward-eligible app AND reward minutes are currently active.
         return allowedApps.contains(pkg) ||
                temporaryApps.contains(pkg) ||
-               (rewardEligibleApps.contains(pkg) && currentRewardMinutes > 0)
+               (rewardEligibleApps.contains(pkg) && rewardSessionActive)
     }
     
     /**
