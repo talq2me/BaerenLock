@@ -358,14 +358,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     override fun onResume() {
         super.onResume()
         
-        // Run daily_reset_process() and then cloud_sync() on main screen load/on focus
+        // Before BaerenLock UI: af_daily_reset then fetch user_data/settings via RPCs (see DbUserDataRefresh).
         val profile = ProfileManager.getCurrentProfile(this)
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                DailyResetAndSyncManager.dailyResetProcessAndSync(this@MainActivity, profile)
-                Log.d(TAG, "Daily reset and sync completed in onResume for profile: $profile")
+                DbUserDataRefresh.runDailyResetThenFetchUserData(this@MainActivity, profile)
+                Log.d(TAG, "DbUserDataRefresh completed in onResume for profile: $profile")
             } catch (e: Exception) {
-                Log.e(TAG, "Error during daily reset and sync in onResume", e)
+                Log.e(TAG, "Error during DbUserDataRefresh in onResume", e)
             }
         }
     }

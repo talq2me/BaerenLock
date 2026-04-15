@@ -51,7 +51,7 @@ class WhitelistSettingsActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             val profile = ProfileManager.getCurrentProfile(this@WhitelistSettingsActivity)
-            val fromCloud = withContext(Dispatchers.IO) { CloudSyncManager.fetchAppListsFromCloud(this@WhitelistSettingsActivity, profile) }
+            val fromCloud = withContext(Dispatchers.IO) { SupabaseInterface.fetchAppListsFromCloud(this@WhitelistSettingsActivity, profile) }
             val whitelistFromDb = fromCloud?.whiteListed ?: emptySet()
             initialPackages = whitelistFromDb
             selectedPackages.clear()
@@ -129,7 +129,7 @@ class WhitelistSettingsActivity : AppCompatActivity() {
             val profile = ProfileManager.getCurrentProfile(this@WhitelistSettingsActivity)
             val json = com.google.gson.Gson().toJson(selectedPackages.toList())
             val ok = withContext(Dispatchers.IO) {
-                CloudSyncManager.patchAppListToCloud(this@WhitelistSettingsActivity, profile, "white_listed_apps", json)
+                SupabaseInterface.patchAppListToCloud(this@WhitelistSettingsActivity, profile, "white_listed_apps", json)
             }
             withContext(Dispatchers.Main) {
                 if (ok) Toast.makeText(this@WhitelistSettingsActivity, "Saved", Toast.LENGTH_SHORT).show()

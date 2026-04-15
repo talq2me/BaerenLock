@@ -2,11 +2,15 @@
 
 ## Does reward time still get decremented in the DB?
 
-**Yes.** BaerenLock does **not** use the SQL RPCs (`af_update_berries_banked`, etc.) for reward minutes. It uses the **Supabase REST API**: it PATCHes the `user_data` row with `banked_mins` (and `last_updated`). The move to “lots in SQL” in BaerenEd did not change this.
+**Yes.** BaerenLock still decrements reward time in DB, but now uses a mix of RPCs and direct REST updates.
+
+- **Reward RPCs used by app code:** `af_reward_time_use`, `af_reward_time_pause`, `af_reward_time_expire`, `af_reward_time_add`.
+- **Other RPC used by app code:** `af_daily_reset`.
+- **Direct REST path still used:** PATCH to `user_data` for `banked_mins` / `last_updated` (and `reward_time_expiry` where applicable).
 
 - **Source of truth:** Cloud `user_data.banked_mins` (and now `reward_time_expiry`).
 - **When the kid uses reward apps:**  
-  `AppBlockerService` runs `checkAndUpdateRewardTime()` every 5 seconds → `RewardManager.performTimerCheck()` uses UsageStats to compute actual reward-app usage, decrements in-memory minutes, then calls `RewardStorage.saveRewardMinutes()` → `CloudSyncManager.syncRewardMinutesToCloudAsync()` → **PATCH** `user_data` with the new `banked_mins`.
+  `AppBlockerService` runs `checkAndUpdateRewardTime()` every 5 seconds → `RewardManager.performTimerCheck()` uses UsageStats to compute actual reward-app usage, decrements in-memory minutes, then calls `RewardStorage.saveRewardMinutes()` → `SupabaseInterface.syncRewardMinutesToCloudAsync()` → **PATCH** `user_data` with the new `banked_mins`.
 - So **each minute in a reward app** is reflected as a **decrease of `banked_mins` in the DB** via this PATCH path.
 
 ## reward_time_expiry (America/Toronto)

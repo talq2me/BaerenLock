@@ -69,11 +69,6 @@ class LauncherActivity : AppCompatActivity() {
         
         prefs = getSharedPreferences("com.talq2me.baerenlock.prefs", Context.MODE_PRIVATE)
         
-        // CRITICAL: Check if reset is needed FIRST, before any syncing
-        // This ensures we don't sync stale data that's about to be reset
-        Log.d(TAG, "Checking if daily reset is needed before syncing")
-        SettingsManager.checkAndTriggerResetIfNeeded(this)
-        
         // Preload settings from Supabase on startup (this also ensures device record exists)
         SettingsManager.preloadSettings(this)
 
@@ -185,9 +180,17 @@ class LauncherActivity : AppCompatActivity() {
             setPadding(8.dpToPx(), 4.dpToPx(), 8.dpToPx(), 4.dpToPx())
             gravity = Gravity.CENTER
             setOnClickListener { view ->
-                Log.d(TAG, "Refresh button: pulling latest from cloud for profile ${readProfile()}")
+                Log.d(TAG, "Refresh button: DbUserDataRefresh for profile ${readProfile()}")
                 view.isEnabled = false
-                SettingsManager.runResetThenDownload(this@LauncherActivity) {
+                lifecycleScope.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            val profile = readProfile() ?: ProfileManager.getCurrentProfile(this@LauncherActivity)
+                            DbUserDataRefresh.runDailyResetThenFetchUserData(this@LauncherActivity, profile)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Refresh failed: ${e.message}", e)
+                    }
                     RewardManager.loadRewardMinutes(this@LauncherActivity)
                     refreshRewardStateAndUi()
                     if (::appGrid.isInitialized) refreshIcons(appGrid)
@@ -337,10 +340,18 @@ class LauncherActivity : AppCompatActivity() {
         // Start periodic health checks (every 5 minutes)
         startPeriodicHealthChecks()
         
-        // CRITICAL: Run reset-if-needed (local first) then download, then refresh reward UI in callback.
-        // This ensures local banked_mins are cleared before any sync, so we never push stale values to cloud.
-        Log.d(TAG, "Running reset-then-download before syncing (onResume)")
-        SettingsManager.runResetThenDownload(this) {
+        Log.d(TAG, "DbUserDataRefresh (onResume)")
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    DbUserDataRefresh.runDailyResetThenFetchUserData(
+                        this@LauncherActivity,
+                        ProfileManager.getCurrentProfile(this@LauncherActivity)
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "DbUserDataRefresh onResume: ${e.message}", e)
+            }
             RewardManager.loadRewardMinutes(this@LauncherActivity)
             refreshRewardStateAndUi()
             refreshIcons(appGrid)
@@ -426,7 +437,7 @@ class LauncherActivity : AppCompatActivity() {
 
     private fun refreshRewardStateAndUi() {
         lifecycleScope.launch {
-            val state = withContext(Dispatchers.IO) { CloudSyncManager.fetchRewardTimeState(this@LauncherActivity) }
+            val state = withContext(Dispatchers.IO) { SupabaseInterface.fetchRewardTimeState(this@LauncherActivity) }
             if (state != null) {
                 RewardManager.currentRewardMinutes = state.bankedMins
                 RewardStorage.setRewardTimeExpiry(state.rewardTimeExpiry)
@@ -468,7 +479,7 @@ class LauncherActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val ok = withContext(Dispatchers.IO) {
-                    CloudSyncManager.useRewardTime(this@LauncherActivity)
+                    SupabaseInterface.useRewardTime(this@LauncherActivity)
                 }
                 if (!ok) {
                     Toast.makeText(this@LauncherActivity, "Could not update reward session", Toast.LENGTH_SHORT).show()
@@ -509,7 +520,7 @@ class LauncherActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val ok = withContext(Dispatchers.IO) {
-                    CloudSyncManager.pauseRewardTime(this@LauncherActivity)
+                    SupabaseInterface.pauseRewardTime(this@LauncherActivity)
                 }
                 if (!ok) {
                     Toast.makeText(this@LauncherActivity, "Could not update reward session", Toast.LENGTH_SHORT).show()
@@ -822,7 +833,7 @@ class LauncherActivity : AppCompatActivity() {
         SettingsManager.syncHealthCheckToCloudAsync(this, healthStatus, healthIssues)
         
         // Also ensure device record exists (in case it wasn't created during startup)
-        CloudSyncManager.ensureDeviceRecordAsync(this)
+        SupabaseInterface.ensureDeviceRecordAsync(this)
         
         // Update health banner with the BASE result (before the accessibility event check modification)
         // This ensures the banner shows the actual permission status, not a modified status
@@ -995,12 +1006,14 @@ class LauncherActivity : AppCompatActivity() {
                 val selectedProfile = profileIds.getOrElse(which) { "AM" }
                 if (currentProfile != selectedProfile) {
                     writeProfile(selectedProfile)
-                    // Download user_data from cloud for the new profile
-                    SettingsManager.downloadUserDataFromCloud(this)
-                    // Reload reward minutes after profile change
-                    RewardManager.loadRewardMinutes(this)
-                    finishAffinity()
-                    startActivity(Intent(this, LauncherActivity::class.java))
+                    lifecycleScope.launch {
+                        withContext(Dispatchers.IO) {
+                            DbUserDataRefresh.runDailyResetThenFetchUserData(this@LauncherActivity, selectedProfile)
+                        }
+                        RewardManager.loadRewardMinutes(this@LauncherActivity)
+                        finishAffinity()
+                        startActivity(Intent(this@LauncherActivity, LauncherActivity::class.java))
+                    }
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -1100,7 +1113,7 @@ class LauncherActivity : AppCompatActivity() {
                 
                 if (minutes != null && minutes > 0) {
                     lifecycleScope.launch {
-                        val ok = withContext(Dispatchers.IO) { CloudSyncManager.addRewardTime(this@LauncherActivity, minutes) }
+                        val ok = withContext(Dispatchers.IO) { SupabaseInterface.addRewardTime(this@LauncherActivity, minutes) }
                         if (!ok) {
                             Toast.makeText(this@LauncherActivity, "Failed to add reward time", Toast.LENGTH_SHORT).show()
                             return@launch
@@ -1108,7 +1121,7 @@ class LauncherActivity : AppCompatActivity() {
                         refreshRewardStateAndUi()
                         refreshIcons(appGrid)
                         Toast.makeText(this@LauncherActivity, "Added $minutes reward minutes", Toast.LENGTH_SHORT).show()
-                        Log.d(TAG, "Added $minutes reward minutes via add_reward_time RPC")
+                        Log.d(TAG, "Added $minutes reward minutes via af_reward_time_add RPC")
                         dialog.dismiss()
                     }
                 } else {

@@ -60,32 +60,16 @@ object RewardStorage {
     }
     
     /**
-     * Pushes current reward minutes to cloud only. No local persistence.
-     * Use when value has changed (timer decrement, add minutes, reset).
-     * @param rewardTimeExpiryOptional If non-null, also PATCH reward_time_expiry to this value (e.g. when granting time).
+     * Legacy no-op in dumb-UI mode.
+     * Reward state is authoritative in DB via `af_reward_time_*` RPCs (use/pause/expire/add), then read back.
      */
     fun saveRewardMinutes(context: Context, updateLastUpdated: Boolean = true, rewardTimeExpiryOptional: String? = null) {
-        Log.d(TAG, "Saving reward minutes to cloud only: $currentRewardMinutes (online-only)")
-        if (rewardTimeExpiryOptional != null) {
-            CloudSyncManager.syncRewardMinutesToCloudAsync(
-                context,
-                currentRewardMinutes,
-                skipTimestampCheck = true,
-                rewardTimeExpiry = rewardTimeExpiryOptional
-            )
-        } else {
-            // Read expiry when the sync runs so jobs queued before pause cannot restore stale reward_time_expiry.
-            CloudSyncManager.syncRewardMinutesToCloudAsyncReadExpiryAtExecution(
-                context,
-                currentRewardMinutes,
-                skipTimestampCheck = true
-            )
-        }
+        Log.d(TAG, "saveRewardMinutes: no-op (reward state managed by af_reward_time_* RPCs)")
     }
     
     /**
      * No-op in online-only mode. Reward minutes are loaded by fetching user_data from cloud
-     * (e.g. DailyResetAndSyncManager / downloadUserDataFromCloud). Returns false so callers know
+     * (e.g. DbUserDataRefresh / downloadUserDataFromCloud). Returns false so callers know
      * no local load occurred.
      */
     fun loadRewardMinutes(context: Context): Boolean {

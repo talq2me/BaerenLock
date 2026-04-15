@@ -43,12 +43,12 @@ object RewardManager {
 
     fun isRewardSessionActive(): Boolean {
         val expiry = RewardStorage.getRewardTimeExpiry()
-        return !expiry.isNullOrBlank() && !CloudSyncManager.isAfterRewardTimeExpiry(expiry)
+        return !expiry.isNullOrBlank() && !SupabaseInterface.isAfterRewardTimeExpiry(expiry)
     }
 
     private fun getRemainingSessionMinutes(): Int {
         val expiry = RewardStorage.getRewardTimeExpiry() ?: return 0
-        val expiryMs = CloudSyncManager.parseTimestampForComparison(expiry)
+        val expiryMs = SupabaseInterface.parseTimestampForComparison(expiry)
         val remainingMs = expiryMs - System.currentTimeMillis()
         if (remainingMs <= 0L) return 0
         return ((remainingMs + 59_999L) / 60_000L).toInt()
@@ -405,28 +405,18 @@ object RewardManager {
     }
     
     /**
-     * Call after [pause_reward_time] RPC succeeds. Clears active session in UI immediately, then retries fetch
+     * Call after [af_reward_time_pause] RPC succeeds. Clears active session in UI immediately, then retries fetch
      * until DB shows no expiry (or gives up). Never uses the "still in session" early-return path that kept the
      * launcher button stuck on "Pause Reward Time" when reads were stale.
      *
      * @param localBankedRemainingAfterPause Remaining session minutes shown when the user tapped Pause (banked value after pause).
-     *        Used for an authoritative PATCH so DB cannot stay "active" if RPC was a no-op or a stale async save restored expiry.
      */
     suspend fun applyPauseRewardFromRpcSuccess(context: Context, localBankedRemainingAfterPause: Int) {
         val banked = localBankedRemainingAfterPause.coerceAtLeast(0)
         RewardStorage.setRewardTimeExpiry(null)
         currentRewardMinutes = banked
-        val patched = CloudSyncManager.syncRewardMinutesToCloud(
-            context,
-            rewardMinutes = banked,
-            skipTimestampCheck = true,
-            rewardTimeExpiry = null
-        )
-        if (!patched) {
-            Log.w(TAG, "applyPauseRewardFromRpcSuccess: forced banked+null-expiry PATCH failed (will still retry fetch)")
-        }
         for (attempt in 0 until 8) {
-            val s = CloudSyncManager.fetchRewardTimeState(context) ?: return
+            val s = SupabaseInterface.fetchRewardTimeState(context) ?: return
             currentRewardMinutes = s.bankedMins
             if (s.rewardTimeExpiry.isNullOrBlank()) {
                 RewardStorage.setRewardTimeExpiry(null)
@@ -438,7 +428,7 @@ object RewardManager {
             }
             delay(200)
         }
-        CloudSyncManager.fetchRewardTimeState(context)?.let { s ->
+        SupabaseInterface.fetchRewardTimeState(context)?.let { s ->
             currentRewardMinutes = s.bankedMins
         }
         RewardStorage.setRewardTimeExpiry(null)
@@ -454,7 +444,7 @@ object RewardManager {
      */
     suspend fun performTimerCheckSuspend(context: Context) {
         val previouslyActive = isRewardSessionActive()
-        var cloudState = CloudSyncManager.fetchRewardTimeState(context) ?: return
+        var cloudState = SupabaseInterface.fetchRewardTimeState(context) ?: return
         currentRewardMinutes = cloudState.bankedMins
         RewardStorage.setRewardTimeExpiry(cloudState.rewardTimeExpiry)
         if (isRewardSessionActive()) {
@@ -463,11 +453,11 @@ object RewardManager {
             return
         }
         if (!cloudState.rewardTimeExpiry.isNullOrBlank()) {
-            Log.d(TAG, "Reward session expired in cloud, calling expire_rewards")
-            CloudSyncManager.expireRewards(context)
+            Log.d(TAG, "Reward session expired in cloud, calling af_reward_time_expire")
+            SupabaseInterface.expireRewards(context)
             RewardStorage.setRewardTimeExpiry(null)
         }
-        // Do NOT treat "pause" like natural expiry: pause_reward_time leaves banked_mins > 0 and expiry null.
+        // Do NOT treat "pause" like natural expiry: af_reward_time_pause leaves banked_mins > 0 and expiry null.
         // Calling handleRewardTimeExpired here would returnToLauncher(CLEAR_TASK), destroy the launcher mid-flow,
         // and leave the reward button stuck disabled ("Working...") on the next Use Reward Time.
         val pausedWithBanked =
@@ -681,13 +671,8 @@ object RewardManager {
             return
         }
         
-        // If we have minutes but no expiry (e.g. loaded from cloud only), set expiry to now + minutes to prevent unlimited use
-        if (currentRewardMinutes > 0 && RewardStorage.getRewardTimeExpiry().isNullOrBlank()) {
-            val expiry = CloudSyncManager.computeRewardTimeExpiryEst(context, currentRewardMinutes)
-            RewardStorage.setRewardTimeExpiry(expiry)
-            saveRewardMinutes(context)
-            Log.d(TAG, "Set reward_time_expiry to $expiry (was null; now + $currentRewardMinutes min)")
-        }
+        // In RPC-authoritative mode, do not invent a local expiry.
+        // Reward session state must come from DB (af_reward_time_use/pause/expire).
 
         // Initialize timing tracking if this is a new session (timer not running)
         val currentTime = System.currentTimeMillis()

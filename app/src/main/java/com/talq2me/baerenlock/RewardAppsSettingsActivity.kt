@@ -40,7 +40,7 @@ class RewardAppsSettingsActivity : AppCompatActivity() {
         loadingView = loadingTv
         lifecycleScope.launch {
             val profile = ProfileManager.getCurrentProfile(this@RewardAppsSettingsActivity)
-            val fromCloud = withContext(Dispatchers.IO) { CloudSyncManager.fetchAppListsFromCloud(this@RewardAppsSettingsActivity, profile) }
+            val fromCloud = withContext(Dispatchers.IO) { SupabaseInterface.fetchAppListsFromCloud(this@RewardAppsSettingsActivity, profile) }
             val rewardFromDb = fromCloud?.rewardApps ?: emptySet()
             initialPackages = rewardFromDb
             selectedPackages.clear()
@@ -89,7 +89,7 @@ class RewardAppsSettingsActivity : AppCompatActivity() {
             val profile = ProfileManager.getCurrentProfile(this@RewardAppsSettingsActivity)
             val json = com.google.gson.Gson().toJson(selectedPackages.toList())
             val ok = withContext(Dispatchers.IO) {
-                CloudSyncManager.patchAppListToCloud(this@RewardAppsSettingsActivity, profile, "reward_apps", json)
+                SupabaseInterface.patchAppListToCloud(this@RewardAppsSettingsActivity, profile, "reward_apps", json)
             }
             withContext(Dispatchers.Main) {
                 if (ok) Toast.makeText(this@RewardAppsSettingsActivity, "Saved", Toast.LENGTH_SHORT).show()

@@ -122,25 +122,9 @@ object RewardAppsManager {
         val permanentApps = allowedApps.filter { !temporaryApps.contains(it) }.toSet()
         prefs.edit().putStringSet(KEY_ALLOWED, permanentApps).apply()
         
-        // Update last_updated timestamp to trigger cloud sync (as per Daily Reset Logic)
-        val profile = ProfileManager.getCurrentProfile(context)
-        updateLastUpdatedTimestamp(context, profile)
-        
         // Sync to cloud
-        CloudSyncManager.syncAppListsToCloudAsync(context)
+        SupabaseInterface.syncAppListsToCloudAsync(context)
         Log.d(TAG, "Saved allowed apps: $permanentApps")
-    }
-    
-    /**
-     * Updates last_updated timestamp in settings prefs to trigger cloud sync
-     * This is called whenever settings that should sync to cloud are changed (as per Daily Reset Logic)
-     */
-    private fun updateLastUpdatedTimestamp(context: Context, profile: String) {
-        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-        val timestamp = CloudSyncManager.generateESTTimestamp()
-        val key = "${profile}_last_updated_timestamp"
-        prefs.edit().putString(key, timestamp).apply()
-        Log.d(TAG, "Updated last_updated timestamp for profile $profile: $timestamp")
     }
     
     /**

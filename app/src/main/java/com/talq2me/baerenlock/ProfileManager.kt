@@ -12,7 +12,6 @@ object ProfileManager {
     private const val TAG = "ProfileManager"
     private const val LOCAL_PREFS_NAME = "settings"
     private const val PROFILE_KEY = "profile"
-    private const val PROFILE_TIMESTAMP_KEY = "profile_timestamp"
 
     /**
      * Reads profile from local storage (AM or BM)
@@ -42,67 +41,23 @@ object ProfileManager {
     }
 
     /**
-     * Writes profile to local storage (AM or BM) and syncs to cloud devices table
-     * Also stores a timestamp for comparison with cloud
+     * Writes profile to local storage (AM/BM/TE) and syncs devices row to DB.
      */
     fun writeProfile(context: Context, profile: String) {
         val prefs = context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
-        val timestamp = CloudSyncManager.generateESTTimestamp()
-        prefs.edit().apply {
-            putString(PROFILE_KEY, profile)
-            putString(PROFILE_TIMESTAMP_KEY, timestamp)
-            apply()
-        }
-        Log.d(TAG, "Profile written: $profile, timestamp: $timestamp")
-        
-        // Update last_updated timestamp to trigger cloud sync (as per Daily Reset Logic)
-        updateLastUpdatedTimestamp(context, profile)
+        prefs.edit().putString(PROFILE_KEY, profile).apply()
+        Log.d(TAG, "Profile written: $profile")
         
         // Sync to cloud devices table asynchronously
         // Force update since this is a user-initiated profile change
-        CloudSyncManager.syncActiveProfileToCloudAsync(context, profile, forceUpdate = true)
+        SupabaseInterface.syncActiveProfileToCloudAsync(context, profile, forceUpdate = true)
     }
     
     /**
-     * Updates last_updated timestamp in settings prefs to trigger cloud sync
-     * This is called whenever settings that should sync to cloud are changed (as per Daily Reset Logic)
-     */
-    private fun updateLastUpdatedTimestamp(context: Context, profile: String) {
-        val prefs = context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
-        val timestamp = CloudSyncManager.generateESTTimestamp()
-        val key = "${profile}_last_updated_timestamp"
-        prefs.edit().putString(key, timestamp).apply()
-        Log.d(TAG, "Updated last_updated timestamp for profile $profile: $timestamp")
-    }
-    
-    /**
-     * Gets the local profile timestamp (when profile was last changed locally)
+     * Legacy compatibility. No local timestamp arbitration in dumb-UI mode.
      */
     fun getLocalProfileTimestamp(context: Context): String? {
-        val prefs = context.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
-        val raw = prefs.getString(PROFILE_TIMESTAMP_KEY, null) ?: return null
-        val normalized = normalizeTimestampToDbFormat(raw)
-        if (normalized != raw) {
-            prefs.edit().putString(PROFILE_TIMESTAMP_KEY, normalized).apply()
-            Log.d(TAG, "Normalized profile_timestamp from '$raw' to '$normalized'")
-        }
-        return normalized
-    }
-
-    /**
-     * Normalizes timestamps to DB format (yyyy-MM-dd HH:mm:ss.SSS, EST, no offset).
-     */
-    private fun normalizeTimestampToDbFormat(timestamp: String): String {
-        val needsNormalize = timestamp.contains('T') || timestamp.endsWith("Z") || timestamp.matches(Regex(".*[+-]\\d{2}:\\d{2}$"))
-        if (!needsNormalize) return timestamp
-
-        val parsedMillis = CloudSyncManager.parseTimestampForComparison(timestamp)
-        if (parsedMillis <= 0L) return timestamp
-
-        val estZone = java.util.TimeZone.getTimeZone("America/Toronto")
-        val df = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
-        df.timeZone = estZone
-        return df.format(java.util.Date(parsedMillis))
+        return null
     }
 
     /**

@@ -50,7 +50,7 @@ class BlackListSettingsActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             val profile = ProfileManager.getCurrentProfile(this@BlackListSettingsActivity)
-            val fromCloud = withContext(Dispatchers.IO) { CloudSyncManager.fetchAppListsFromCloud(this@BlackListSettingsActivity, profile) }
+            val fromCloud = withContext(Dispatchers.IO) { SupabaseInterface.fetchAppListsFromCloud(this@BlackListSettingsActivity, profile) }
             val blacklistFromDb = fromCloud?.blacklisted ?: emptySet()
             initialPackages = blacklistFromDb
             selectedPackages.clear()
@@ -117,7 +117,7 @@ class BlackListSettingsActivity : AppCompatActivity() {
             val profile = ProfileManager.getCurrentProfile(this@BlackListSettingsActivity)
             val json = com.google.gson.Gson().toJson(selectedPackages.toList())
             val ok = withContext(Dispatchers.IO) {
-                CloudSyncManager.patchAppListToCloud(this@BlackListSettingsActivity, profile, "blacklisted_apps", json)
+                SupabaseInterface.patchAppListToCloud(this@BlackListSettingsActivity, profile, "blacklisted_apps", json)
             }
             withContext(Dispatchers.Main) {
                 if (ok) Toast.makeText(this@BlackListSettingsActivity, "Saved", Toast.LENGTH_SHORT).show()
