@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.InputType
 import android.util.Log
@@ -28,6 +29,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -45,10 +47,16 @@ class LauncherActivity : AppCompatActivity() {
     private var pauseRewardButton: Button? = null
     private var backgroundImageView: ImageView? = null
     private var internetIndicatorButton: Button? = null
+    /** Wall-clock sync via [SystemClock.elapsedRealtime] so sleep does not skew the interval. */
+    private var lastRewardCloudStateSyncElapsed: Long = 0L
+    @Volatile
+    private var rewardCloudStateSyncInFlight: Boolean = false
 
     companion object {
         private const val TAG = "LauncherActivity"
         const val ACTION_REWARD_EXPIRED = "com.talq2me.baerenlock.ACTION_REWARD_EXPIRED"
+        /** Re-read `banked_mins` + `reward_time_expiry` from DB so UI matches Postgres (e.g. after device sleep). */
+        private const val REWARD_CLOUD_STATE_SYNC_INTERVAL_MS = 60_000L
     }
 
     private val rewardExpiredReceiver = object : BroadcastReceiver() {
@@ -192,7 +200,8 @@ class LauncherActivity : AppCompatActivity() {
                         Log.e(TAG, "Refresh failed: ${e.message}", e)
                     }
                     RewardManager.loadRewardMinutes(this@LauncherActivity)
-                    refreshRewardStateAndUi()
+                    syncRewardTimeStateFromCloudOrNull()
+                    updateRewardMinutesDisplay()
                     if (::appGrid.isInitialized) refreshIcons(appGrid)
                     refreshBackgroundImage()
                     updateInternetIndicatorState()
@@ -353,7 +362,8 @@ class LauncherActivity : AppCompatActivity() {
                 Log.e(TAG, "DbUserDataRefresh onResume: ${e.message}", e)
             }
             RewardManager.loadRewardMinutes(this@LauncherActivity)
-            refreshRewardStateAndUi()
+            syncRewardTimeStateFromCloudWithRetry()
+            updateRewardMinutesDisplay()
             refreshIcons(appGrid)
         }
         
@@ -400,6 +410,22 @@ class LauncherActivity : AppCompatActivity() {
         rewardRunnable = object : Runnable {
             override fun run() {
                 updateRewardMinutesDisplay()
+                val now = SystemClock.elapsedRealtime()
+                if (lastRewardCloudStateSyncElapsed == 0L ||
+                    now - lastRewardCloudStateSyncElapsed >= REWARD_CLOUD_STATE_SYNC_INTERVAL_MS) {
+                    lastRewardCloudStateSyncElapsed = now
+                    if (SupabaseInterface.isConfigured(this@LauncherActivity) && !rewardCloudStateSyncInFlight) {
+                        rewardCloudStateSyncInFlight = true
+                        lifecycleScope.launch {
+                            try {
+                                syncRewardTimeStateFromCloudOrNull()
+                                updateRewardMinutesDisplay()
+                            } finally {
+                                rewardCloudStateSyncInFlight = false
+                            }
+                        }
+                    }
+                }
                 handler.postDelayed(this, 1000L)
             }
         }
@@ -409,6 +435,7 @@ class LauncherActivity : AppCompatActivity() {
     private fun stopRewardDisplayUpdate() {
         rewardRunnable?.let { handler.removeCallbacks(it) }
         rewardRunnable = null
+        lastRewardCloudStateSyncElapsed = 0L
     }
 
     private fun updateRewardMinutesDisplay() {
@@ -437,13 +464,42 @@ class LauncherActivity : AppCompatActivity() {
 
     private fun refreshRewardStateAndUi() {
         lifecycleScope.launch {
-            val state = withContext(Dispatchers.IO) { SupabaseInterface.fetchRewardTimeState(this@LauncherActivity) }
-            if (state != null) {
-                RewardManager.currentRewardMinutes = state.bankedMins
-                RewardStorage.setRewardTimeExpiry(state.rewardTimeExpiry)
-            }
+            syncRewardTimeStateFromCloudWithRetry()
             updateRewardMinutesDisplay()
         }
+    }
+
+    /**
+     * Startup/resume helper: fetch reward state from DB with short retries so UI reflects
+     * `banked_mins` quickly after app launch/install and transient network delays.
+     */
+    private suspend fun syncRewardTimeStateFromCloudWithRetry(
+        maxAttempts: Int = 8,
+        delayMs: Long = 250L
+    ): Boolean {
+        repeat(maxAttempts) { attempt ->
+            if (syncRewardTimeStateFromCloudOrNull()) {
+                return true
+            }
+            if (attempt < maxAttempts - 1) {
+                delay(delayMs)
+            }
+        }
+        return false
+    }
+
+    /**
+     * Lightweight read of reward fields via `af_get_reward_time_state` (no daily reset).
+     * On failure, leaves in-memory cache unchanged.
+     */
+    private suspend fun syncRewardTimeStateFromCloudOrNull(): Boolean {
+        if (!SupabaseInterface.isConfigured(this@LauncherActivity)) return false
+        val state = withContext(Dispatchers.IO) {
+            SupabaseInterface.fetchRewardTimeState(this@LauncherActivity)
+        } ?: return false
+        RewardManager.currentRewardMinutes = state.bankedMins
+        RewardStorage.setRewardTimeExpiry(state.rewardTimeExpiry)
+        return true
     }
 
     private fun updateRewardActionButton() {
@@ -668,7 +724,8 @@ class LauncherActivity : AppCompatActivity() {
                 packageManager.getPackageInfo(packageName, 0)
             }
             val name = packageInfo.versionName ?: packageInfo.longVersionCode.toString()
-            "v$name"
+            val profile = readProfile() ?: "AM"
+            "v$name - $profile"
         } catch (e: Exception) {
             "v?"
         }
@@ -1113,12 +1170,29 @@ class LauncherActivity : AppCompatActivity() {
                 
                 if (minutes != null && minutes > 0) {
                     lifecycleScope.launch {
+                        val previousBanked = withContext(Dispatchers.IO) {
+                            SupabaseInterface.fetchRewardTimeState(this@LauncherActivity)?.bankedMins
+                        } ?: 0
                         val ok = withContext(Dispatchers.IO) { SupabaseInterface.addRewardTime(this@LauncherActivity, minutes) }
                         if (!ok) {
                             Toast.makeText(this@LauncherActivity, "Failed to add reward time", Toast.LENGTH_SHORT).show()
                             return@launch
                         }
-                        refreshRewardStateAndUi()
+                        // Wait briefly for DB state to be readable, then apply it before showing success.
+                        withContext(Dispatchers.IO) {
+                            for (attempt in 0 until 8) {
+                                val state = SupabaseInterface.fetchRewardTimeState(this@LauncherActivity)
+                                if (state != null) {
+                                    RewardManager.currentRewardMinutes = state.bankedMins
+                                    RewardStorage.setRewardTimeExpiry(state.rewardTimeExpiry)
+                                    if (state.bankedMins >= previousBanked + minutes) {
+                                        break
+                                    }
+                                }
+                                delay(200)
+                            }
+                        }
+                        updateRewardMinutesDisplay()
                         refreshIcons(appGrid)
                         Toast.makeText(this@LauncherActivity, "Added $minutes reward minutes", Toast.LENGTH_SHORT).show()
                         Log.d(TAG, "Added $minutes reward minutes via af_reward_time_add RPC")
@@ -1196,7 +1270,7 @@ class LauncherActivity : AppCompatActivity() {
     /** Call after profile was updated from cloud (e.g. from async checkAndApplyProfileFromCloudSuspend). */
     private fun refreshUiAfterProfileChangeFromCloud() {
         refreshBackgroundImage()
-        updateRewardMinutesDisplay()
+        refreshRewardStateAndUi()
         if (::appGrid.isInitialized) refreshIcons(appGrid)
     }
 

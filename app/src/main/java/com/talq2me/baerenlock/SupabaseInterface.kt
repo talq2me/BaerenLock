@@ -135,16 +135,18 @@ object SupabaseInterface {
     )
 
     /**
-     * Reads banked_mins and reward_time_expiry for the current profile.
+     * Reads banked_mins and reward_time_expiry for the current profile via [af_get_reward_time_state]
+     * (small payload; used for dumb-UI polling without pulling the full user_data row).
      */
     suspend fun fetchRewardTimeState(context: Context): RewardTimeState? = withContext(Dispatchers.IO) {
         if (!isConfigured(context)) return@withContext null
         return@withContext try {
             val profile = ProfileManager.getCurrentProfile(context)
-            val body = callRpcReturningBody(context, "af_get_user_data", mapOf("p_profile" to profile))
-            val row = parseJsonObjectBody(body) ?: return@withContext RewardTimeState(0, null)
-            val mins = (row["banked_mins"] as? Number)?.toInt() ?: 0
-            val expiry = row["reward_time_expiry"] as? String
+            val body = callRpcReturningBody(context, "af_get_reward_time_state", mapOf("p_profile" to profile))
+            val row = parseJsonObjectBody(body)
+            row ?: return@withContext RewardTimeState(0, null)
+            val mins = valueAsInt(row["banked_mins"])
+            val expiry = valueAsString(row["reward_time_expiry"])
             RewardTimeState(mins, expiry)
         } catch (e: Exception) {
             Log.e(TAG, "Error fetching reward time state", e)
@@ -254,10 +256,47 @@ object SupabaseInterface {
     private fun parseJsonObjectBody(body: String?): Map<String, Any?>? {
         if (body.isNullOrBlank() || body == "null" || body == "{}" || body == "[]") return null
         return try {
-            gson.fromJson(body, object : TypeToken<Map<String, Any?>>() {}.type) as? Map<String, Any?>
+            parseAsMapOrFirstArrayObject(body)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse RPC object payload: $body", e)
             null
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun parseAsMapOrFirstArrayObject(rawBody: String): Map<String, Any?>? {
+        val trimmed = rawBody.trim()
+
+        // Common case: direct JSON object payload.
+        val asMap = gson.fromJson(trimmed, object : TypeToken<Map<String, Any?>>() {}.type) as? Map<String, Any?>
+        if (!asMap.isNullOrEmpty()) return asMap
+
+        // Some RPC gateways can return a one-item array for object payloads.
+        val asList = gson.fromJson(trimmed, object : TypeToken<List<Map<String, Any?>>>() {}.type) as? List<Map<String, Any?>>
+        if (!asList.isNullOrEmpty()) return asList.first()
+
+        // Some payloads can be a JSON string containing an object; unwrap and parse once more.
+        val unwrapped = runCatching { gson.fromJson(trimmed, String::class.java) }.getOrNull()
+        if (!unwrapped.isNullOrBlank() && unwrapped != trimmed) {
+            val unwrappedMap = gson.fromJson(unwrapped, object : TypeToken<Map<String, Any?>>() {}.type) as? Map<String, Any?>
+            if (!unwrappedMap.isNullOrEmpty()) return unwrappedMap
+        }
+        return null
+    }
+
+    private fun valueAsInt(value: Any?): Int {
+        return when (value) {
+            is Number -> value.toInt()
+            is String -> value.trim().toIntOrNull() ?: 0
+            else -> 0
+        }
+    }
+
+    private fun valueAsString(value: Any?): String? {
+        return when (value) {
+            null -> null
+            is String -> value
+            else -> value.toString()
         }
     }
 
@@ -565,10 +604,10 @@ object SupabaseInterface {
             val responseBody = callRpcReturningBody(context, "af_get_user_data", mapOf("p_profile" to cloudProfile))
             val userData = parseJsonObjectBody(responseBody)
             if (userData != null) {
-                val cloudBankedMins = (userData["banked_mins"] as? Number)?.toInt() ?: 0
+                val cloudBankedMins = valueAsInt(userData["banked_mins"])
                 RewardStorage.setCurrentRewardMinutes(cloudBankedMins)
                 RewardManager.currentRewardMinutes = cloudBankedMins
-                val cloudRewardTimeExpiry = userData["reward_time_expiry"] as? String
+                val cloudRewardTimeExpiry = valueAsString(userData["reward_time_expiry"])
                 RewardStorage.setRewardTimeExpiry(cloudRewardTimeExpiry)
                 Log.d(TAG, "Applied banked_mins from cloud to in-memory: $cloudBankedMins, reward_time_expiry: $cloudRewardTimeExpiry for profile: $cloudProfile (online-only, no local persistence)")
                 
