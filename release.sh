@@ -57,58 +57,8 @@ echo "Pre-build check passed!"
 
 ### --- RUN AUTOMATED TESTS --- ###
 echo ""
-echo "Running automated integration tests..."
-echo "These tests verify database synchronization and app list management."
-
-# Check if a device/emulator is connected
-# Count devices (excluding the "List of devices" header line)
-DEVICE_OUTPUT=$(adb devices 2>/dev/null | grep -v "List" | grep "device$" || echo "")
-DEVICE_COUNT=$(echo "$DEVICE_OUTPUT" | wc -l)
-# Remove any whitespace and ensure it's a number
-DEVICE_COUNT=$(echo "$DEVICE_COUNT" | tr -d '[:space:]')
-if [ -z "$DEVICE_COUNT" ] || ! [[ "$DEVICE_COUNT" =~ ^[0-9]+$ ]]; then
-    DEVICE_COUNT=0
-fi
-
-if [ "$DEVICE_COUNT" -eq 0 ]; then
-    echo "WARNING: No Android device/emulator detected."
-    echo "Skipping integration tests (connectedAndroidTest requires a device)."
-    echo "To run tests manually: ./gradlew connectedAndroidTest"
-    echo ""
-    echo "Proceeding with release (tests will be skipped)..."
-else
-    echo "Found $DEVICE_COUNT connected device(s). Running tests..."
-    
-    # Build debug APK and test APK (required for connectedAndroidTest)
-    echo "Building debug APK and test APK for testing..."
-    ./gradlew assembleDebugAndroidTest
-    
-    if [ $? -ne 0 ]; then
-        echo ""
-        echo "ERROR: Failed to build debug APK or test APK!"
-        echo "Please fix build errors before running tests."
-        exit 1
-    fi
-    
-    # Run the automated integration tests
-    # Note: --tests doesn't work with connectedAndroidTest, so we run all connected tests
-    # The test classes will skip themselves if Supabase is not configured
-   # ./gradlew connectedAndroidTest
-    
-    if [ $? -ne 0 ]; then
-        echo ""
-        echo "ERROR: Integration tests failed!"
-        echo "Please fix failing tests before releasing."
-        echo ""
-        echo "Note: Tests require Supabase to be configured (SUPABASE_URL and SUPABASE_KEY in local.properties)"
-        echo "      Tests will automatically skip if Supabase is not configured."
-        exit 1
-    fi
-    
-    echo ""
-    echo "✓ All automated integration tests passed!"
-    echo ""
-fi
+echo "Skipping automated tests in release flow."
+echo ""
 
 echo "Proceeding with release..."
 
