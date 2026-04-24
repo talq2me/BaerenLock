@@ -542,6 +542,27 @@ class LauncherActivity : AppCompatActivity() {
                     return@launch
                 }
 
+                // IMPORTANT: Do not continue until a fresh reward state is fetched from DB.
+                // This prevents stale local state from showing incorrect remaining minutes.
+                val synced = withContext(Dispatchers.IO) {
+                    syncRewardTimeStateAfterUseReward(maxAttempts = 20, delayMs = 250L)
+                }
+                if (!synced) {
+                    Log.e(TAG, "Use Reward Time: DB state was not readable after retries")
+                    // Fail-safe: never keep/derive UI from a stale local expiry if cloud confirmation failed.
+                    // In DB-authoritative mode this avoids showing huge incorrect countdowns from old in-memory state.
+                    RewardStorage.setRewardTimeExpiry(null)
+                    updateRewardMinutesDisplay()
+                    updateRewardActionButton()
+                    Toast.makeText(
+                        this@LauncherActivity,
+                        "Could not read reward session from server. Please try again.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@launch
+                }
+
+                // Keep side effects aligned with the now-confirmed cloud state.
                 try {
                     withContext(Dispatchers.IO) {
                         RewardManager.performTimerCheckSuspend(this@LauncherActivity)
@@ -566,6 +587,38 @@ class LauncherActivity : AppCompatActivity() {
                 updateRewardActionButton()
             }
         }
+    }
+
+    /**
+     * After af_reward_time_use succeeds, keep polling DB until reward_time_expiry is visible.
+     * Returns true only when a fresh, active reward session state is confirmed from DB.
+     */
+    private suspend fun syncRewardTimeStateAfterUseReward(
+        maxAttempts: Int,
+        delayMs: Long
+    ): Boolean {
+        repeat(maxAttempts) { attempt ->
+            val state = SupabaseInterface.fetchRewardTimeState(this@LauncherActivity)
+            if (state != null) {
+                RewardManager.currentRewardMinutes = state.bankedMins
+                RewardStorage.setRewardTimeExpiry(state.rewardTimeExpiry)
+                val active = !state.rewardTimeExpiry.isNullOrBlank()
+                Log.d(
+                    TAG,
+                    "syncRewardTimeStateAfterUseReward attempt=${attempt + 1}/$maxAttempts, " +
+                        "banked=${state.bankedMins}, expiry=${state.rewardTimeExpiry}, active=$active"
+                )
+                if (active) {
+                    return true
+                }
+            } else {
+                Log.w(TAG, "syncRewardTimeStateAfterUseReward attempt=${attempt + 1}/$maxAttempts: null state")
+            }
+            if (attempt < maxAttempts - 1) {
+                delay(delayMs)
+            }
+        }
+        return false
     }
 
     private fun onPauseRewardClicked() {
@@ -881,19 +934,26 @@ class LauncherActivity : AppCompatActivity() {
         // Store health check result for reporting
         storeHealthCheckResult(result)
         
-        // Sync health check to cloud using the same result as the banner (baseResult).
-        // This keeps the parent report in sync with what the user sees on the tablet:
-        // only report unhealthy when the banner would show unhealthy (real permission issues),
-        // not when we've downgraded locally due to "service not receiving events" (e.g. device idle).
-        val healthStatus = if (baseResult.isHealthy()) "healthy" else "unhealthy"
-        val healthIssues = if (baseResult.hasIssues()) baseResult.getIssueDescription() else null
+        // Sync health check to cloud using enforcement-aware status, but keep the on-device
+        // banner focused on actionable permission issues to avoid false "enable accessibility" prompts.
+        val healthStatus = if (result.isHealthy()) "healthy" else "unhealthy"
+        val healthIssues = if (
+            baseResult.accessibilityStatus == ServiceHealthMonitor.HealthStatus.HEALTHY &&
+            result.accessibilityStatus != ServiceHealthMonitor.HealthStatus.HEALTHY
+        ) {
+            "Accessibility service is enabled but not receiving events"
+        } else if (result.hasIssues()) {
+            result.getIssueDescription()
+        } else {
+            null
+        }
         SettingsManager.syncHealthCheckToCloudAsync(this, healthStatus, healthIssues)
         
         // Also ensure device record exists (in case it wasn't created during startup)
         SupabaseInterface.ensureDeviceRecordAsync(this)
         
-        // Update health banner with the BASE result (before the accessibility event check modification)
-        // This ensures the banner shows the actual permission status, not a modified status
+        // Keep banner based on base permission state so we don't incorrectly say
+        // "enable accessibility" when it is already enabled.
         updateHealthBanner(baseResult)
         
         return result

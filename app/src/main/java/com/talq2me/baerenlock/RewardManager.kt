@@ -20,6 +20,7 @@ import kotlinx.coroutines.runBlocking
 
 object RewardManager {
     private const val TAG = "RewardManager"
+    private var lastRemainingMinutesDebugLogMs: Long = 0L
 
     // Delegate to RewardStorage for current minutes
     var currentRewardMinutes: Int
@@ -50,6 +51,16 @@ object RewardManager {
         val expiry = RewardStorage.getRewardTimeExpiry() ?: return 0
         val expiryMs = SupabaseInterface.parseTimestampForComparison(expiry)
         val remainingMs = expiryMs - System.currentTimeMillis()
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastRemainingMinutesDebugLogMs >= 60_000L) {
+            val computedMinutes = if (remainingMs <= 0L) 0 else ((remainingMs + 59_999L) / 60_000L).toInt()
+            Log.d(
+                TAG,
+                "getRemainingSessionMinutes: nowMs=$nowMs, expiryRaw=$expiry, expiryMs=$expiryMs, " +
+                    "remainingMs=$remainingMs, computedMinutes=$computedMinutes, bankedMins=$currentRewardMinutes"
+            )
+            lastRemainingMinutesDebugLogMs = nowMs
+        }
         if (remainingMs <= 0L) return 0
         return ((remainingMs + 59_999L) / 60_000L).toInt()
     }
@@ -445,9 +456,17 @@ object RewardManager {
     suspend fun performTimerCheckSuspend(context: Context) {
         val previouslyActive = isRewardSessionActive()
         var cloudState = SupabaseInterface.fetchRewardTimeState(context) ?: return
+        val nowMs = System.currentTimeMillis()
+        val expiryMs = cloudState.rewardTimeExpiry?.let { SupabaseInterface.parseTimestampForComparison(it) } ?: 0L
+        Log.d(
+            TAG,
+            "performTimerCheckSuspend: nowMs=$nowMs, banked=${cloudState.bankedMins}, " +
+                "expiryRaw=${cloudState.rewardTimeExpiry}, expiryMs=$expiryMs, previouslyActive=$previouslyActive"
+        )
         currentRewardMinutes = cloudState.bankedMins
         RewardStorage.setRewardTimeExpiry(cloudState.rewardTimeExpiry)
         if (isRewardSessionActive()) {
+            Log.d(TAG, "performTimerCheckSuspend: reward session is active after cloud sync; keeping session active")
             startRewardSessionTracking(context)
             notifyRewardTimeChanged(context)
             return
@@ -462,6 +481,11 @@ object RewardManager {
         // and leave the reward button stuck disabled ("Working...") on the next Use Reward Time.
         val pausedWithBanked =
             cloudState.rewardTimeExpiry.isNullOrBlank() && cloudState.bankedMins > 0
+        Log.d(
+            TAG,
+            "performTimerCheckSuspend: inactive state. pausedWithBanked=$pausedWithBanked, " +
+                "rewardSessionActive=$rewardSessionActive, previouslyActive=$previouslyActive"
+        )
         if ((previouslyActive || rewardSessionActive) && !pausedWithBanked) {
             handleRewardTimeExpired(context)
         } else if (pausedWithBanked && previouslyActive) {

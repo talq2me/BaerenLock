@@ -21,12 +21,21 @@ import android.graphics.Color
 import android.os.HandlerThread
 import android.os.Looper
 import android.widget.Toast
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
 
 class AppBlockerService : AccessibilityService() {
 
     private var lastPackage: String? = null
     private lateinit var backgroundThread: HandlerThread
     private lateinit var backgroundHandler: Handler
+    private val rewardCheckScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val rewardCheckInFlight = AtomicBoolean(false)
     private val periodicCheck = object : Runnable {
         override fun run() {
             checkForegroundApp()
@@ -54,9 +63,15 @@ class AppBlockerService : AccessibilityService() {
         override fun run() {
             val shouldCheckRewardState =
                 RewardManager.isRewardSessionActive() || RewardManager.currentRewardMinutes > 0
+            Log.d(
+                "AppBlocker",
+                "rewardTimerCheck tick: shouldCheckRewardState=$shouldCheckRewardState, " +
+                    "isRewardSessionActive=${RewardManager.isRewardSessionActive()}, " +
+                    "currentRewardMinutes=${RewardManager.currentRewardMinutes}"
+            )
             if (shouldCheckRewardState) {
                 // Only sync reward state while reward mode is active or banked minutes exist.
-                checkAndUpdateRewardTime()
+                checkAndUpdateRewardTimeAsync()
                 // Active/banked reward state: keep a minute cadence.
                 backgroundHandler.postDelayed(this, 60_000)
             } else {
@@ -193,6 +208,7 @@ class AppBlockerService : AccessibilityService() {
         backgroundHandler.removeCallbacks(backgroundCleanupCheck)
         backgroundHandler.removeCallbacks(rewardTimerCheck)
         backgroundHandler.removeCallbacks(healthCheckRunnable)
+        rewardCheckScope.cancel()
         backgroundThread.quitSafely()
         stopForeground(true)
     }
@@ -449,10 +465,16 @@ class AppBlockerService : AccessibilityService() {
                     lastForeground = event.packageName
                 }
             }
-            val pkgName = lastForeground ?: return
+            // IMPORTANT: ACTIVITY_RESUMED events can be silent for long stretches while a reward app
+            // stays open. Fall back to our last known foreground package so expiry still enforces.
+            val pkgName = lastForeground ?: lastPackage ?: return
+            if (lastForeground == null) {
+                Log.d("AppBlocker", "checkUsageStats: no recent ACTIVITY_RESUMED event, using lastPackage=$pkgName")
+            }
             
             // Update RewardManager with the current foreground app (for accurate reward time counting)
             RewardManager.updateForegroundApp(pkgName)
+            lastPackage = pkgName
             
             // Check if this app should be blocked
             if (shouldBlockApp(pkgName)) {
@@ -489,13 +511,25 @@ class AppBlockerService : AccessibilityService() {
      * Checks and updates reward time - called periodically from background thread.
      * This runs even when BaerenLock is in the background, ensuring accurate time tracking.
      */
-    private fun checkAndUpdateRewardTime() {
-        try {
-            // Call RewardManager to perform a single timer check/update iteration
-            // This will check UsageStats, calculate time used, and save if needed
-            RewardManager.performTimerCheck(this)
-        } catch (e: Exception) {
-            Log.e("AppBlocker", "Error checking/updating reward time", e)
+    private fun checkAndUpdateRewardTimeAsync() {
+        if (!rewardCheckInFlight.compareAndSet(false, true)) {
+            Log.d("AppBlocker", "Skipping reward check; previous check still running")
+            return
+        }
+        rewardCheckScope.launch {
+            try {
+                // Bound cloud/RPC latency so a slow network can't stall reward enforcement loops.
+                val completed = withTimeoutOrNull(20_000L) {
+                    RewardManager.performTimerCheckSuspend(this@AppBlockerService)
+                }
+                if (completed == null) {
+                    Log.w("AppBlocker", "Reward check timed out after 20s")
+                }
+            } catch (e: Exception) {
+                Log.e("AppBlocker", "Error checking/updating reward time", e)
+            } finally {
+                rewardCheckInFlight.set(false)
+            }
         }
     }
 

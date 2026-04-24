@@ -17,6 +17,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.*
 import java.util.Collections
+import java.util.concurrent.TimeUnit
 
 /**
  * BaerenLock Supabase REST/RPC client (OkHttp): settings row, `user_data` fetch/patch, reward-time RPCs,
@@ -28,7 +29,12 @@ object SupabaseInterface {
     private const val LOCAL_PREFS_NAME = "settings"
     private val gson = Gson()
     private val gsonSerializeNulls = GsonBuilder().serializeNulls().create()
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(20, TimeUnit.SECONDS)
+        .build()
     
     // Shared coroutine scope for all async operations - prevents memory leaks
     private val syncScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
