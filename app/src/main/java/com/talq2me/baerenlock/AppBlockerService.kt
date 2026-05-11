@@ -356,6 +356,17 @@ class AppBlockerService : AccessibilityService() {
             return false
         }
 
+        // Enforce reward expiry first: if a reward app has no effective minutes left, block it
+        // even if it is Chrome with JeLis/BaerenEd special handling.
+        val isRewardApp = RewardManager.rewardEligibleApps.contains(pkgName)
+        if (isRewardApp) {
+            val effectiveRewardMinutes = RewardManager.getEffectiveRewardMinutes(this)
+            if (effectiveRewardMinutes <= 0) {
+                Log.d("AppBlocker", "🚫 Blocking reward app $pkgName: effectiveRewardMinutes=$effectiveRewardMinutes (reward time expired or past expiry)")
+                return true
+            }
+        }
+
         // Get the blacklist using BlacklistManager
         val blacklist = BlacklistManager.getBlacklist(this)
 
@@ -368,16 +379,6 @@ class AppBlockerService : AccessibilityService() {
                 }
             }
             return true
-        }
-
-        // Block if it's a reward-eligible app with 0 effective minutes (expired reward or past reward_time_expiry)
-        val isRewardApp = RewardManager.rewardEligibleApps.contains(pkgName)
-        if (isRewardApp) {
-            val effectiveRewardMinutes = RewardManager.getEffectiveRewardMinutes(this)
-            if (effectiveRewardMinutes <= 0) {
-                Log.d("AppBlocker", "🚫 Blocking reward app $pkgName: effectiveRewardMinutes=$effectiveRewardMinutes (reward time expired or past expiry)")
-                return true
-            }
         }
 
         // Everything else is allowed (not blocked)
