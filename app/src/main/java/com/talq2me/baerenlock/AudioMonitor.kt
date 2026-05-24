@@ -36,14 +36,20 @@ class AudioMonitor(
 
     @Volatile
     var thresholdPercent: Int = DEFAULT_THRESHOLD
+        set(value) {
+            val clamped = value.coerceIn(0, 100)
+            if (field != clamped) {
+                field = clamped
+                resetLoudnessTracking()
+            }
+        }
 
     private var loudSinceMs: Long = 0L
     private var quietSinceMs: Long = 0L
+    private var monitorStartedAtMs: Long = 0L
     private var lastHeartbeatLogMs: Long = 0L
     private var lastPermissionWarnMs: Long = 0L
     private var lastRecorderWarnMs: Long = 0L
-    private val recentLevels = IntArray(RECENT_LEVEL_SLOTS)
-    private var recentLevelIdx = 0
     private var consecutiveZeroPeakTicks = 0
     private var hadSignalThisSession = false
     private var lastStrongSignalMs: Long = 0L
@@ -108,27 +114,28 @@ class AudioMonitor(
                 } else {
                     metrics.levelPercent
                 }
-                recordRecentLevel(effectiveLevel)
-                val smoothed = smoothedRecentLevel()
-                val overloadNote = if (metrics.overloadMute) " overloadMute=true" else ""
+                val inGracePeriod = now - monitorStartedAtMs < STARTUP_GRACE_MS
                 maybeLogHeartbeat(
                     now,
                     "sample n=${metrics.samplesRead} peakRaw=${metrics.peakRaw} rmsRaw=${metrics.rmsRaw} " +
-                        "level=${metrics.levelPercent}% effective=$effectiveLevel% smooth=$smoothed%$overloadNote " +
-                        "threshold=$thresholdPercent% loudForMs=${loudDurationMs(now)} needMs=$SUSTAINED_LOUD_MS"
+                        "peak=${metrics.peakPercent}% level=$effectiveLevel% threshold=$thresholdPercent% " +
+                        "loudForMs=${loudDurationMs(now)} needMs=$SUSTAINED_LOUD_MS grace=$inGracePeriod"
                 )
-                updateLoudnessState(now, smoothed)
-                if (loudDurationMs(now) >= SUSTAINED_LOUD_MS) {
-                    Log.w(
-                        tag,
-                        "Sustained loudness (smooth=$smoothed% >= $thresholdPercent%), triggering pause"
-                    )
-                    loudSinceMs = 0L
-                    quietSinceMs = 0L
-                    onSustainedLoudness()
-                    pauseTriggered = true
-                    stop()
-                    return
+                if (!inGracePeriod) {
+                    updateLoudnessState(now, effectiveLevel)
+                    if (loudDurationMs(now) >= SUSTAINED_LOUD_MS) {
+                        Log.w(
+                            tag,
+                            "Sustained loudness (level=$effectiveLevel% peakRaw=${metrics.peakRaw} " +
+                                ">= threshold=$thresholdPercent%), triggering pause"
+                        )
+                        loudSinceMs = 0L
+                        quietSinceMs = 0L
+                        onSustainedLoudness()
+                        pauseTriggered = true
+                        stop()
+                        return
+                    }
                 }
             } else {
                 maybeLogHeartbeat(now, "no audio samples this tick")
@@ -159,13 +166,13 @@ class AudioMonitor(
         }
     }
 
-    private fun recordRecentLevel(levelPercent: Int) {
-        recentLevels[recentLevelIdx] = levelPercent
-        recentLevelIdx = (recentLevelIdx + 1) % RECENT_LEVEL_SLOTS
-    }
-
-    private fun smoothedRecentLevel(): Int {
-        return recentLevels.max()
+    private fun resetLoudnessTracking() {
+        loudSinceMs = 0L
+        quietSinceMs = 0L
+        consecutiveZeroPeakTicks = 0
+        hadSignalThisSession = false
+        lastStrongSignalMs = 0L
+        overloadMuteActive = false
     }
 
     /**
@@ -226,8 +233,8 @@ class AudioMonitor(
         val rms = sqrt(sumSq / totalSamples)
         val rmsInt = rms.toInt().coerceAtLeast(0)
         val peakPct = amplitudeToPercent(totalPeak)
-        val rmsPct = amplitudeToPercent(rmsInt.coerceAtLeast(1))
-        val level = max(peakPct, rmsPct)
+        val rmsPct = if (rmsInt > 0) amplitudeToPercent(rmsInt) else 0
+        val level = peakPct
         val base = SampleMetrics(
             samplesRead = totalSamples,
             peakRaw = totalPeak,
@@ -246,23 +253,18 @@ class AudioMonitor(
     fun start() {
         if (running) return
         running = true
-        loudSinceMs = 0L
-        quietSinceMs = 0L
+        resetLoudnessTracking()
+        monitorStartedAtMs = System.currentTimeMillis()
         lastHeartbeatLogMs = 0L
         tickCount = 0
-        recentLevels.fill(0)
-        recentLevelIdx = 0
-        consecutiveZeroPeakTicks = 0
-        hadSignalThisSession = false
-        lastStrongSignalMs = 0L
-        overloadMuteActive = false
         handlerThread = HandlerThread("AudioMonitor").apply { start() }
         handler = Handler(handlerThread!!.looper)
         handler?.post(sampleRunnable)
-        Log.d(
+        Log.i(
             tag,
             "Audio monitor started (enabled=$enabled, threshold=$thresholdPercent, " +
-                "micPerm=${hasRecordPermission()}, sessionActive=${RewardManager.isRewardSessionActive()})"
+                "graceMs=$STARTUP_GRACE_MS, micPerm=${hasRecordPermission()}, " +
+                "sessionActive=${RewardManager.isRewardSessionActive()})"
         )
     }
 
@@ -398,12 +400,12 @@ class AudioMonitor(
         private const val SAMPLE_RATE = 16_000
         private const val SAMPLE_SIZE = 512
         private const val SAMPLE_INTERVAL_MS = 400L
-        private const val SUSTAINED_LOUD_MS = 2_500L
-        private const val QUIET_RESET_MS = 700L
+        private const val SUSTAINED_LOUD_MS = 3_000L
+        private const val STARTUP_GRACE_MS = 8_000L
+        private const val QUIET_RESET_MS = 900L
         private const val HEARTBEAT_LOG_INTERVAL_MS = 3_000L
         private const val WARN_THROTTLE_MS = 15_000L
         private const val MAX_READS_PER_TICK = 4
-        private const val RECENT_LEVEL_SLOTS = 8
         /** Emulator/host mic often mutes to all-zero PCM when input clips. */
         private const val MIN_SAMPLES_FOR_OVERLOAD_CHECK = 256
         private const val CONSECUTIVE_ZERO_PEAK_TICKS = 2

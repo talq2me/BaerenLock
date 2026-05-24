@@ -403,6 +403,7 @@ class GuardianForegroundService : Service() {
             .coerceIn(0, 100)
         audioMonitor?.enabled = audioMonitorEnabled
         audioMonitor?.thresholdPercent = audioLoudnessThreshold
+        Log.d(TAG, "Audio settings synced: enabled=$audioMonitorEnabled threshold=$audioLoudnessThreshold")
     }
 
     private fun syncAudioMonitorState() {
@@ -426,8 +427,19 @@ class GuardianForegroundService : Service() {
                 )
                 val startTask = Runnable {
                     pendingAudioMonitorStart = null
-                    if (audioMonitorEnabled && RewardManager.isRewardSessionActive()) {
-                        audioMonitor?.start()
+                    serviceScope.launch {
+                        refreshSettingsFromCloud()
+                        if (!audioMonitorEnabled || !RewardManager.isRewardSessionActive()) return@launch
+                        audioMonitor?.enabled = audioMonitorEnabled
+                        audioMonitor?.thresholdPercent = audioLoudnessThreshold
+                        delay(250)
+                        if (audioMonitorEnabled && RewardManager.isRewardSessionActive()) {
+                            Log.d(
+                                TAG,
+                                "Starting audio monitor after settings refresh (threshold=$audioLoudnessThreshold)"
+                            )
+                            audioMonitor?.start()
+                        }
                     }
                 }
                 pendingAudioMonitorStart = startTask
@@ -510,6 +522,7 @@ class GuardianForegroundService : Service() {
                     }
                     RewardManager.performTimerCheckSuspend(this)
                     RewardManager.refreshRewardEligibleApps(this)
+                    refreshSettingsFromCloud()
                     withContext(Dispatchers.Main) { updateNotification() }
                     syncAudioMonitorState()
                     return
