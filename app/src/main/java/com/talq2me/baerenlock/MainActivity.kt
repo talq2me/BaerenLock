@@ -64,6 +64,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        GuardianForegroundService.ensureRunning(this)
         // Preload settings from Supabase on startup
         SettingsManager.preloadSettings(this)
 

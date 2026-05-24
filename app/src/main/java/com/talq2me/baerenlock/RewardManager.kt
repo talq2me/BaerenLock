@@ -42,12 +42,37 @@ object RewardManager {
         return if (isRewardSessionActive()) getRemainingSessionMinutes() else currentRewardMinutes
     }
 
+    /**
+     * Applies a fresh [af_get_reward_time_state] payload (server is source of truth for session remaining).
+     */
+    fun applyCloudRewardTimeState(state: SupabaseInterface.RewardTimeState) {
+        currentRewardMinutes = state.bankedMins
+        RewardStorage.setRewardTimeExpiry(state.rewardTimeExpiry)
+        RewardStorage.setServerSessionMinsRemaining(
+            if (state.rewardSessionActive) state.rewardMinsRemaining else 0
+        )
+    }
+
     fun isRewardSessionActive(): Boolean {
+        RewardStorage.getServerSessionMinsRemaining()?.let { serverRemaining ->
+            return serverRemaining > 0
+        }
         val expiry = RewardStorage.getRewardTimeExpiry()
         return !expiry.isNullOrBlank() && !SupabaseInterface.isAfterRewardTimeExpiry(expiry)
     }
 
     private fun getRemainingSessionMinutes(): Int {
+        RewardStorage.getServerSessionMinsRemaining()?.let { serverRemaining ->
+            if (nowMs() - lastRemainingMinutesDebugLogMs >= 60_000L) {
+                Log.d(
+                    TAG,
+                    "getRemainingSessionMinutes: serverRemaining=$serverRemaining, " +
+                        "expiryRaw=${RewardStorage.getRewardTimeExpiry()}, bankedMins=$currentRewardMinutes"
+                )
+                lastRemainingMinutesDebugLogMs = nowMs()
+            }
+            return serverRemaining.coerceAtLeast(0)
+        }
         val expiry = RewardStorage.getRewardTimeExpiry() ?: return 0
         val expiryMs = SupabaseInterface.parseTimestampForComparison(expiry)
         val remainingMs = expiryMs - System.currentTimeMillis()
@@ -56,14 +81,16 @@ object RewardManager {
             val computedMinutes = if (remainingMs <= 0L) 0 else ((remainingMs + 59_999L) / 60_000L).toInt()
             Log.d(
                 TAG,
-                "getRemainingSessionMinutes: nowMs=$nowMs, expiryRaw=$expiry, expiryMs=$expiryMs, " +
-                    "remainingMs=$remainingMs, computedMinutes=$computedMinutes, bankedMins=$currentRewardMinutes"
+                "getRemainingSessionMinutes: (client fallback) nowMs=$nowMs, expiryRaw=$expiry, " +
+                    "expiryMs=$expiryMs, remainingMs=$remainingMs, computedMinutes=$computedMinutes"
             )
             lastRemainingMinutesDebugLogMs = nowMs
         }
         if (remainingMs <= 0L) return 0
         return ((remainingMs + 59_999L) / 60_000L).toInt()
     }
+
+    private fun nowMs(): Long = System.currentTimeMillis()
     
     private var rewardTimer: Handler? = null
     private var rewardRunnable: Runnable? = null
@@ -425,12 +452,14 @@ object RewardManager {
     suspend fun applyPauseRewardFromRpcSuccess(context: Context, localBankedRemainingAfterPause: Int) {
         val banked = localBankedRemainingAfterPause.coerceAtLeast(0)
         RewardStorage.setRewardTimeExpiry(null)
+        RewardStorage.setServerSessionMinsRemaining(0)
         currentRewardMinutes = banked
         for (attempt in 0 until 8) {
             val s = SupabaseInterface.fetchRewardTimeState(context) ?: return
-            currentRewardMinutes = s.bankedMins
+            applyCloudRewardTimeState(s)
             if (s.rewardTimeExpiry.isNullOrBlank()) {
                 RewardStorage.setRewardTimeExpiry(null)
+                RewardStorage.setServerSessionMinsRemaining(0)
                 Log.d(TAG, "applyPauseRewardFromRpcSuccess: synced paused state (attempt ${attempt + 1})")
                 RewardAppsManager.clearTemporaryApps(context)
                 endRewardSessionTracking()
@@ -463,8 +492,7 @@ object RewardManager {
             "performTimerCheckSuspend: nowMs=$nowMs, banked=${cloudState.bankedMins}, " +
                 "expiryRaw=${cloudState.rewardTimeExpiry}, expiryMs=$expiryMs, previouslyActive=$previouslyActive"
         )
-        currentRewardMinutes = cloudState.bankedMins
-        RewardStorage.setRewardTimeExpiry(cloudState.rewardTimeExpiry)
+        applyCloudRewardTimeState(cloudState)
         if (isRewardSessionActive()) {
             Log.d(TAG, "performTimerCheckSuspend: reward session is active after cloud sync; keeping session active")
             startRewardSessionTracking(context)
@@ -498,7 +526,7 @@ object RewardManager {
     }
 
     /**
-     * Performs a single timer check iteration - called from AppBlockerService background thread.
+     * Performs a single timer check iteration - called from GuardianForegroundService background loop.
      */
     fun performTimerCheck(context: Context) {
         runBlocking {

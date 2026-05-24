@@ -31,7 +31,9 @@ object SettingsManager {
         val parentEmail: String? = null,
         val childName: String? = null,
         val rewardApps: Set<String>? = null,
-        val aggressiveCleanup: Boolean? = null
+        val aggressiveCleanup: Boolean? = null,
+        val rewardAudioMonitorEnabled: Boolean? = null,
+        val rewardAudioLoudnessThreshold: Int? = null
     )
 
     /**
@@ -66,7 +68,12 @@ object SettingsManager {
             parentEmail = prefs.getString("parent_email", null),
             childName = prefs.getString("child_name", null),
             rewardApps = if (rewardApps.isNotEmpty()) rewardApps else null,
-            aggressiveCleanup = prefs.getBoolean("aggressive_cleanup", true)
+            aggressiveCleanup = prefs.getBoolean("aggressive_cleanup", true),
+            rewardAudioMonitorEnabled = prefs.getBoolean("reward_audio_monitor_enabled", true),
+            rewardAudioLoudnessThreshold = prefs.getInt(
+                "reward_audio_loudness_threshold",
+                AudioMonitor.DEFAULT_THRESHOLD
+            )
         )
     }
 
@@ -85,6 +92,8 @@ object SettingsManager {
             data.childName?.let { putString("child_name", it) }
             data.rewardApps?.let { putStringSet("reward_apps", it) }
             data.aggressiveCleanup?.let { putBoolean("aggressive_cleanup", it) }
+            data.rewardAudioMonitorEnabled?.let { putBoolean("reward_audio_monitor_enabled", it) }
+            data.rewardAudioLoudnessThreshold?.let { putInt("reward_audio_loudness_threshold", it) }
             apply()
         }
     }

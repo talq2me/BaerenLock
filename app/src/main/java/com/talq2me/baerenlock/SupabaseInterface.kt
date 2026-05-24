@@ -15,6 +15,12 @@ import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.OffsetDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
 import java.util.*
 import java.util.Collections
 import java.util.concurrent.TimeUnit
@@ -137,7 +143,10 @@ object SupabaseInterface {
      */
     data class RewardTimeState(
         val bankedMins: Int,
-        val rewardTimeExpiry: String?
+        val rewardTimeExpiry: String?,
+        /** Active-session minutes remaining; computed on server (America/Toronto). */
+        val rewardMinsRemaining: Int,
+        val rewardSessionActive: Boolean,
     )
 
     /**
@@ -150,10 +159,12 @@ object SupabaseInterface {
             val profile = ProfileManager.getCurrentProfile(context)
             val body = callRpcReturningBody(context, "af_get_reward_time_state", mapOf("p_profile" to profile))
             val row = parseJsonObjectBody(body)
-            row ?: return@withContext RewardTimeState(0, null)
+            row ?: return@withContext RewardTimeState(0, null, 0, false)
             val mins = valueAsInt(row["banked_mins"])
             val expiry = valueAsString(row["reward_time_expiry"])
-            RewardTimeState(mins, expiry)
+            val remaining = valueAsInt(row["reward_mins_remaining"])
+            val sessionActive = valueAsBoolean(row["reward_session_active"])
+            RewardTimeState(mins, expiry, remaining, sessionActive)
         } catch (e: Exception) {
             Log.e(TAG, "Error fetching reward time state", e)
             null
@@ -293,20 +304,54 @@ object SupabaseInterface {
     private fun valueAsInt(value: Any?): Int {
         return when (value) {
             is Number -> value.toInt()
-            is String -> value.trim().toIntOrNull() ?: 0
+            is String -> value.trim().trim('"').toIntOrNull() ?: 0
             else -> 0
         }
     }
 
-    private fun valueAsString(value: Any?): String? {
+    private fun valueAsBoolean(value: Any?): Boolean {
         return when (value) {
-            null -> null
-            is String -> value
-            else -> value.toString()
+            is Boolean -> value
+            is Number -> value.toInt() != 0
+            is String -> value.trim().trim('"').equals("true", ignoreCase = true) || value == "1"
+            else -> false
         }
     }
 
-    suspend fun useRewardTime(context: Context): Boolean = callRewardRpc(context, "af_reward_time_use")
+    private fun valueAsString(value: Any?): String? {
+        val raw = when (value) {
+            null -> return null
+            is String -> value
+            else -> value.toString()
+        }
+        val trimmed = raw.trim().trim('"')
+        return trimmed.ifBlank { null }
+    }
+
+    suspend fun useRewardTime(context: Context): Boolean = withContext(Dispatchers.IO) {
+        if (!isConfigured(context)) return@withContext false
+        return@withContext try {
+            val profile = ProfileManager.getCurrentProfile(context)
+            val body = callRpcReturningBody(
+                context,
+                "af_reward_time_use",
+                mapOf("p_profile" to profile)
+            )
+            if (body == null) return@withContext false
+            val row = parseJsonObjectBody(body)
+            if (row != null) {
+                Log.d(
+                    TAG,
+                    "af_reward_time_use: banked_used=${row["banked_used"]}, " +
+                        "expiry=${row["reward_time_expiry"]}, toronto_now=${row["toronto_now"]}"
+                )
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error calling af_reward_time_use", e)
+            false
+        }
+    }
 
     suspend fun pauseRewardTime(context: Context): Boolean = callRewardRpc(context, "af_reward_time_pause")
 
@@ -331,6 +376,8 @@ object SupabaseInterface {
                 val pin = settings["pin"] as? String
                 val parentEmail = settings["parent_email"] as? String
                 val aggressiveCleanup = settings["aggressive_cleanup"] as? Boolean
+                val rewardAudioMonitorEnabled = settings["reward_audio_monitor_enabled"] as? Boolean
+                val rewardAudioLoudnessThreshold = (settings["reward_audio_loudness_threshold"] as? Number)?.toInt()
                 val cloudTimestamp = settings["last_updated"] as? String
                 val data = SettingsManager.SettingsData(
                     profile = null,
@@ -338,9 +385,16 @@ object SupabaseInterface {
                     parentEmail = parentEmail,
                     childName = null,
                     rewardApps = null,
-                    aggressiveCleanup = aggressiveCleanup
+                    aggressiveCleanup = aggressiveCleanup,
+                    rewardAudioMonitorEnabled = rewardAudioMonitorEnabled,
+                    rewardAudioLoudnessThreshold = rewardAudioLoudnessThreshold
                 )
-                Log.d(TAG, "Loaded settings from cloud: pin=${pin?.take(1)}..., email=$parentEmail, aggressiveCleanup=$aggressiveCleanup, timestamp=$cloudTimestamp")
+                Log.d(
+                    TAG,
+                    "Loaded settings from cloud: pin=${pin?.take(1)}..., email=$parentEmail, " +
+                        "aggressiveCleanup=$aggressiveCleanup, audioMonitor=$rewardAudioMonitorEnabled, " +
+                        "audioThreshold=$rewardAudioLoudnessThreshold, timestamp=$cloudTimestamp"
+                )
                 return@withContext Pair(data, cloudTimestamp ?: "")
             }
         } catch (e: Exception) {
@@ -372,10 +426,22 @@ object SupabaseInterface {
             if (data.aggressiveCleanup != null) {
                 settingsMap["aggressive_cleanup"] = data.aggressiveCleanup
             }
-            
-            val validKeys = listOf("pin", "parent_email", "aggressive_cleanup")
+            if (data.rewardAudioMonitorEnabled != null) {
+                settingsMap["reward_audio_monitor_enabled"] = data.rewardAudioMonitorEnabled
+            }
+            if (data.rewardAudioLoudnessThreshold != null) {
+                settingsMap["reward_audio_loudness_threshold"] = data.rewardAudioLoudnessThreshold
+            }
+
+            val validKeys = listOf(
+                "pin",
+                "parent_email",
+                "aggressive_cleanup",
+                "reward_audio_monitor_enabled",
+                "reward_audio_loudness_threshold"
+            )
             val cleanedMap = settingsMap.filterKeys { it in validKeys }
-            
+
             Log.d(TAG, "Sending settings to cloud (keys: ${cleanedMap.keys}) via af_upsert_settings_row")
             val ok = callRpcNoBody(
                 context,
@@ -383,7 +449,9 @@ object SupabaseInterface {
                 mapOf(
                     "p_parent_email" to cleanedMap["parent_email"],
                     "p_pin" to cleanedMap["pin"],
-                    "p_aggressive_cleanup" to cleanedMap["aggressive_cleanup"]
+                    "p_aggressive_cleanup" to cleanedMap["aggressive_cleanup"],
+                    "p_reward_audio_monitor_enabled" to cleanedMap["reward_audio_monitor_enabled"],
+                    "p_reward_audio_loudness_threshold" to cleanedMap["reward_audio_loudness_threshold"]
                 )
             )
             if (ok) {
@@ -930,44 +998,52 @@ object SupabaseInterface {
         }
     }
     
+    private val TORONTO_ZONE: ZoneId = ZoneId.of("America/Toronto")
+    private val TORONTO_WALL_FORMATTERS = listOf(
+        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"),
+        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SS"),
+        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
+    )
+
     /**
-     * Parses timestamp string to milliseconds for comparison (EST, DB format).
+     * Parses a DB/API timestamp to epoch millis for comparison with [System.currentTimeMillis].
+     * - ISO with `Z` or numeric offset: real instant (UTC-aware).
+     * - Bare `yyyy-MM-dd HH:mm:ss[.SSS]` (or `T` separator): America/Toronto wall clock (DB convention).
      */
     fun parseTimestampForComparison(timestamp: String): Long {
+        val trimmed = timestamp.trim()
+        if (trimmed.isEmpty()) return 0L
         return try {
-            var baseTimestamp = when {
-                timestamp.endsWith("Z") -> timestamp.substringBeforeLast('Z')
-                timestamp.matches(Regex(".*[+-]\\d{2}:\\d{2}$")) -> {
-                    val offsetStart = timestamp.lastIndexOfAny(charArrayOf('+', '-'))
-                    if (offsetStart > 10) timestamp.substring(0, offsetStart) else timestamp
+            when {
+                trimmed.endsWith("Z", ignoreCase = true) ->
+                    Instant.parse(trimmed).toEpochMilli()
+                hasTimezoneOffsetSuffix(trimmed) -> {
+                    val iso = trimmed.replace(' ', 'T')
+                    OffsetDateTime.parse(iso).toInstant().toEpochMilli()
                 }
-                else -> timestamp
-            }
-            baseTimestamp = baseTimestamp.replace('T', ' ')
-
-            val estZone = java.util.TimeZone.getTimeZone("America/Toronto")
-            val formats = listOf(
-                "yyyy-MM-dd HH:mm:ss.SSS",
-                "yyyy-MM-dd HH:mm:ss.SS",
-                "yyyy-MM-dd HH:mm:ss"
-            )
-            for (pattern in formats) {
-                try {
-                    val df = java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault())
-                    df.timeZone = estZone
-                    val parsed = df.parse(baseTimestamp)
-                    if (parsed != null) {
-                        return parsed.time
+                else -> {
+                    val wall = trimmed.replace('T', ' ')
+                    for (formatter in TORONTO_WALL_FORMATTERS) {
+                        try {
+                            val ldt = LocalDateTime.parse(wall, formatter)
+                            return ldt.atZone(TORONTO_ZONE).toInstant().toEpochMilli()
+                        } catch (_: DateTimeParseException) {
+                            // try next pattern
+                        }
                     }
-                } catch (_: Exception) {
-                    // try next
+                    0L
                 }
             }
-            0L
         } catch (e: Exception) {
-            Log.e(TAG, "Error parsing timestamp for comparison: $timestamp", e)
+            Log.e(TAG, "Error parsing timestamp for comparison: $trimmed", e)
             0L
         }
+    }
+
+    private fun hasTimezoneOffsetSuffix(value: String): Boolean {
+        val iso = value.replace(' ', 'T')
+        return iso.matches(Regex(".*[+-]\\d{2}:\\d{2}$")) ||
+            iso.matches(Regex(".*[+-]\\d{2}\\d{2}$"))
     }
     
     /**

@@ -22,9 +22,19 @@ object RewardStorage {
     @Volatile
     private var rewardTimeExpiry: String? = null
 
+    /** Minutes left in active session from last [af_get_reward_time_state] poll (server clock). Null = not yet fetched. */
+    @Volatile
+    private var serverSessionMinsRemaining: Int? = null
+
     fun getRewardTimeExpiry(): String? = rewardTimeExpiry
     fun setRewardTimeExpiry(expiry: String?) {
         rewardTimeExpiry = expiry
+    }
+
+    fun getServerSessionMinsRemaining(): Int? = serverSessionMinsRemaining
+
+    fun setServerSessionMinsRemaining(minutes: Int?) {
+        serverSessionMinsRemaining = minutes
     }
     
     /**
@@ -56,6 +66,7 @@ object RewardStorage {
     fun resetRewardMinutesLocal(context: Context) {
         currentRewardMinutes = 0
         rewardTimeExpiry = null
+        serverSessionMinsRemaining = null
         Log.d(TAG, "Reset reward minutes in memory to 0 (online-only: no local persistence)")
     }
     

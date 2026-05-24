@@ -1,5 +1,6 @@
 package com.talq2me.baerenlock
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -15,7 +16,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
+import android.app.role.RoleManager
 import android.provider.Settings
 import android.text.InputType
 import android.util.Log
@@ -24,6 +25,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -47,16 +50,9 @@ class LauncherActivity : AppCompatActivity() {
     private var pauseRewardButton: Button? = null
     private var backgroundImageView: ImageView? = null
     private var internetIndicatorButton: Button? = null
-    /** Wall-clock sync via [SystemClock.elapsedRealtime] so sleep does not skew the interval. */
-    private var lastRewardCloudStateSyncElapsed: Long = 0L
-    @Volatile
-    private var rewardCloudStateSyncInFlight: Boolean = false
-
     companion object {
         private const val TAG = "LauncherActivity"
         const val ACTION_REWARD_EXPIRED = "com.talq2me.baerenlock.ACTION_REWARD_EXPIRED"
-        /** Re-read `banked_mins` + `reward_time_expiry` from DB so UI matches Postgres (e.g. after device sleep). */
-        private const val REWARD_CLOUD_STATE_SYNC_INTERVAL_MS = 60_000L
     }
 
     private val rewardExpiredReceiver = object : BroadcastReceiver() {
@@ -67,6 +63,9 @@ class LauncherActivity : AppCompatActivity() {
             } else if (intent?.action == RewardTimeReceiver.ACTION_REWARD_TIME_UPDATED) {
                 Log.d(TAG, "Received ACTION_REWARD_TIME_UPDATED broadcast. Refreshing UI.")
                 refreshRewardStateAndUi()
+            } else if (intent?.action == GuardianContract.ACTION_ACCESSIBILITY_STALE) {
+                Log.w(TAG, "Accessibility heartbeat stale - refreshing health banner")
+                performHealthCheck()
             }
         }
     }
@@ -76,7 +75,9 @@ class LauncherActivity : AppCompatActivity() {
         Log.d(TAG, "onCreate() called - initializing app")
         
         prefs = getSharedPreferences("com.talq2me.baerenlock.prefs", Context.MODE_PRIVATE)
-        
+
+        GuardianForegroundService.ensureRunning(this)
+
         // Preload settings from Supabase on startup (this also ensures device record exists)
         SettingsManager.preloadSettings(this)
 
@@ -94,6 +95,8 @@ class LauncherActivity : AppCompatActivity() {
 
         // Request overlay permission if not granted
         maybeRequestOverlayPermission()
+        maybeRequestNotificationPermission()
+        maybeRequestRecordAudioPermissionAfterNotifications()
         
         // Perform health check on startup to detect issues immediately
         Log.d(TAG, "Performing initial health check on startup")
@@ -125,6 +128,8 @@ class LauncherActivity : AppCompatActivity() {
         accessibilityBanner = Button(this).apply {
             setBackgroundColor(0xFFE57373.toInt())
             setTextColor(0xFFFFFFFF.toInt())
+            isClickable = true
+            isFocusable = true
             // Banner text and click listener will be set by updateHealthBanner()
         }
         contentLayout.addView(accessibilityBanner, 0)
@@ -367,6 +372,10 @@ class LauncherActivity : AppCompatActivity() {
             refreshIcons(appGrid)
         }
         
+        if (hasRecordAudioPermission()) {
+            GuardianForegroundService.ensureRunning(this)
+        }
+
         // Check for profile changes from cloud in background (do not block main thread)
         lifecycleScope.launch {
             val profileChanged = withContext(Dispatchers.IO) {
@@ -388,9 +397,12 @@ class LauncherActivity : AppCompatActivity() {
 
         startRewardDisplayUpdate()
 
+        GuardianForegroundService.ensureRunning(this)
+
         val filter = IntentFilter().apply {
             addAction(ACTION_REWARD_EXPIRED)
             addAction(RewardTimeReceiver.ACTION_REWARD_TIME_UPDATED)
+            addAction(GuardianContract.ACTION_ACCESSIBILITY_STALE)
         }
         LocalBroadcastManager.getInstance(this).registerReceiver(
             rewardExpiredReceiver, filter
@@ -410,22 +422,6 @@ class LauncherActivity : AppCompatActivity() {
         rewardRunnable = object : Runnable {
             override fun run() {
                 updateRewardMinutesDisplay()
-                val now = SystemClock.elapsedRealtime()
-                if (lastRewardCloudStateSyncElapsed == 0L ||
-                    now - lastRewardCloudStateSyncElapsed >= REWARD_CLOUD_STATE_SYNC_INTERVAL_MS) {
-                    lastRewardCloudStateSyncElapsed = now
-                    if (SupabaseInterface.isConfigured(this@LauncherActivity) && !rewardCloudStateSyncInFlight) {
-                        rewardCloudStateSyncInFlight = true
-                        lifecycleScope.launch {
-                            try {
-                                syncRewardTimeStateFromCloudOrNull()
-                                updateRewardMinutesDisplay()
-                            } finally {
-                                rewardCloudStateSyncInFlight = false
-                            }
-                        }
-                    }
-                }
                 handler.postDelayed(this, 1000L)
             }
         }
@@ -435,7 +431,6 @@ class LauncherActivity : AppCompatActivity() {
     private fun stopRewardDisplayUpdate() {
         rewardRunnable?.let { handler.removeCallbacks(it) }
         rewardRunnable = null
-        lastRewardCloudStateSyncElapsed = 0L
     }
 
     private fun updateRewardMinutesDisplay() {
@@ -497,8 +492,7 @@ class LauncherActivity : AppCompatActivity() {
         val state = withContext(Dispatchers.IO) {
             SupabaseInterface.fetchRewardTimeState(this@LauncherActivity)
         } ?: return false
-        RewardManager.currentRewardMinutes = state.bankedMins
-        RewardStorage.setRewardTimeExpiry(state.rewardTimeExpiry)
+        RewardManager.applyCloudRewardTimeState(state)
         return true
     }
 
@@ -529,64 +523,27 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun onUseRewardClicked() {
+        ensureRecordAudioPermission {
+            startUseRewardFlow()
+        }
+    }
+
+    private fun startUseRewardFlow() {
         val button = useRewardButton
         button?.isEnabled = false
         button?.text = "Working..."
-        lifecycleScope.launch {
+        GuardianForegroundService.requestUseReward(this)
+        handler.postDelayed({
+            button?.text = "Use Reward Time"
+            button?.isEnabled = true
+            updateRewardActionButton()
+            updateRewardMinutesDisplay()
             try {
-                val ok = withContext(Dispatchers.IO) {
-                    SupabaseInterface.useRewardTime(this@LauncherActivity)
-                }
-                if (!ok) {
-                    Toast.makeText(this@LauncherActivity, "Could not update reward session", Toast.LENGTH_SHORT).show()
-                    return@launch
-                }
-
-                // IMPORTANT: Do not continue until a fresh reward state is fetched from DB.
-                // This prevents stale local state from showing incorrect remaining minutes.
-                val synced = withContext(Dispatchers.IO) {
-                    syncRewardTimeStateAfterUseReward(maxAttempts = 20, delayMs = 250L)
-                }
-                if (!synced) {
-                    Log.e(TAG, "Use Reward Time: DB state was not readable after retries")
-                    // Fail-safe: never keep/derive UI from a stale local expiry if cloud confirmation failed.
-                    // In DB-authoritative mode this avoids showing huge incorrect countdowns from old in-memory state.
-                    RewardStorage.setRewardTimeExpiry(null)
-                    updateRewardMinutesDisplay()
-                    updateRewardActionButton()
-                    Toast.makeText(
-                        this@LauncherActivity,
-                        "Could not read reward session from server. Please try again.",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    return@launch
-                }
-
-                // Keep side effects aligned with the now-confirmed cloud state.
-                try {
-                    withContext(Dispatchers.IO) {
-                        RewardManager.performTimerCheckSuspend(this@LauncherActivity)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "reward sync after RPC failed", e)
-                    Toast.makeText(this@LauncherActivity, "Could not sync reward state", Toast.LENGTH_SHORT).show()
-                }
-
-                RewardManager.refreshRewardEligibleApps(this@LauncherActivity)
-                updateRewardMinutesDisplay()
-                // Restore clickability before heavy grid rebuild so the button never stays stuck on "Working..."
-                updateRewardActionButton()
-                try {
-                    refreshIcons(appGrid)
-                } catch (e: Exception) {
-                    Log.e(TAG, "refreshIcons failed", e)
-                }
-            } finally {
-                button?.text = "Use Reward Time"
-                button?.isEnabled = true
-                updateRewardActionButton()
+                refreshIcons(appGrid)
+            } catch (e: Exception) {
+                Log.e(TAG, "refreshIcons failed", e)
             }
-        }
+        }, 8_000L)
     }
 
     /**
@@ -600,9 +557,8 @@ class LauncherActivity : AppCompatActivity() {
         repeat(maxAttempts) { attempt ->
             val state = SupabaseInterface.fetchRewardTimeState(this@LauncherActivity)
             if (state != null) {
-                RewardManager.currentRewardMinutes = state.bankedMins
-                RewardStorage.setRewardTimeExpiry(state.rewardTimeExpiry)
-                val active = !state.rewardTimeExpiry.isNullOrBlank()
+                RewardManager.applyCloudRewardTimeState(state)
+                val active = state.rewardSessionActive
                 Log.d(
                     TAG,
                     "syncRewardTimeStateAfterUseReward attempt=${attempt + 1}/$maxAttempts, " +
@@ -623,42 +579,144 @@ class LauncherActivity : AppCompatActivity() {
 
     private fun onPauseRewardClicked() {
         val button = pauseRewardButton
-        val localRemainingWhenPaused = RewardManager.getDisplayRewardMinutes(this)
         button?.isEnabled = false
         button?.text = "Working..."
-        lifecycleScope.launch {
+        GuardianForegroundService.requestPauseReward(this)
+        handler.postDelayed({
+            button?.text = "Pause Reward Time"
+            button?.isEnabled = true
+            updateRewardActionButton()
+            updateRewardMinutesDisplay()
             try {
-                val ok = withContext(Dispatchers.IO) {
-                    SupabaseInterface.pauseRewardTime(this@LauncherActivity)
-                }
-                if (!ok) {
-                    Toast.makeText(this@LauncherActivity, "Could not update reward session", Toast.LENGTH_SHORT).show()
-                    return@launch
-                }
+                refreshIcons(appGrid)
+            } catch (e: Exception) {
+                Log.e(TAG, "refreshIcons failed", e)
+            }
+        }, 5_000L)
+    }
 
-                try {
-                    withContext(Dispatchers.IO) {
-                        RewardManager.applyPauseRewardFromRpcSuccess(this@LauncherActivity, localRemainingWhenPaused)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "reward sync after RPC failed", e)
-                    Toast.makeText(this@LauncherActivity, "Could not sync reward state", Toast.LENGTH_SHORT).show()
-                }
+    private var pendingAfterMicGranted: (() -> Unit)? = null
 
-                RewardManager.refreshRewardEligibleApps(this@LauncherActivity)
-                updateRewardMinutesDisplay()
-                updateRewardActionButton()
-                try {
-                    refreshIcons(appGrid)
-                } catch (e: Exception) {
-                    Log.e(TAG, "refreshIcons failed", e)
-                }
-            } finally {
-                button?.text = "Pause Reward Time"
-                button?.isEnabled = true
-                updateRewardActionButton()
+    private val requestNotificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        Log.d(TAG, "POST_NOTIFICATIONS granted=$granted")
+        if (granted) {
+            GuardianForegroundService.ensureRunning(this)
+            maybeRequestRecordAudioPermission()
+        } else {
+            Toast.makeText(
+                this,
+                "Allow notifications so Tablet Rules status is visible",
+                Toast.LENGTH_LONG
+            ).show()
+            maybeRequestRecordAudioPermission()
+        }
+    }
+
+    private val requestRecordAudioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        Log.d(TAG, "RECORD_AUDIO granted=$granted")
+        if (granted) {
+            GuardianForegroundService.ensureRunning(this)
+            pendingAfterMicGranted?.invoke()
+            pendingAfterMicGranted = null
+        } else {
+            pendingAfterMicGranted = null
+            if (shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+                Toast.makeText(
+                    this,
+                    "Microphone is needed to pause reward time when yelling is detected",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                showRecordAudioSettingsDialog()
             }
         }
+    }
+
+    private fun hasRecordAudioPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * Runs [onGranted] when mic permission is available. Otherwise shows the system prompt or app settings.
+     */
+    private fun ensureRecordAudioPermission(onGranted: () -> Unit) {
+        if (hasRecordAudioPermission()) {
+            onGranted()
+            return
+        }
+        pendingAfterMicGranted = onGranted
+        if (shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+            AlertDialog.Builder(this)
+                .setTitle("Microphone permission")
+                .setMessage(
+                    "BaerenLock listens during reward time to detect sustained loud yelling " +
+                        "and pause reward time. Please allow microphone access."
+                )
+                .setPositiveButton("Allow") { _, _ ->
+                    requestRecordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+                .setNegativeButton("Open settings") { _, _ -> openAppSettings() }
+                .setOnCancelListener { pendingAfterMicGranted = null }
+                .show()
+        } else {
+            requestRecordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun showRecordAudioSettingsDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Microphone permission required")
+            .setMessage(
+                "Loud-noise detection during reward time needs microphone access. " +
+                    "Open BaerenLock settings and allow Microphone."
+            )
+            .setPositiveButton("Open settings") { _, _ -> openAppSettings() }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    private fun openAppSettings() {
+        startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", packageName, null)
+            }
+        )
+    }
+
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        Log.d(TAG, "POST_NOTIFICATIONS not granted, requesting")
+        requestNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun maybeRequestRecordAudioPermissionAfterNotifications() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        maybeRequestRecordAudioPermission()
+    }
+
+    private fun maybeRequestRecordAudioPermission() {
+        if (hasRecordAudioPermission()) return
+        Log.d(TAG, "RECORD_AUDIO not granted, requesting")
+        handler.postDelayed({
+            if (!hasRecordAudioPermission() && pendingAfterMicGranted == null) {
+                requestRecordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        }, 600)
     }
 
     private fun maybeRequestOverlayPermission() {
@@ -712,21 +770,7 @@ class LauncherActivity : AppCompatActivity() {
                         .setTitle("Set BaerenLock as Home")
                         .setMessage("BaerenLock needs to be set as your default launcher to work properly. When you press the home button, it should open BaerenLock.\n\nPlease go to Settings and select BaerenLock as your Home app.")
                         .setPositiveButton("Open Settings") { _, _ ->
-                            try {
-                                // Try the direct home settings intent first
-                                val settingsIntent = Intent(Settings.ACTION_HOME_SETTINGS)
-                                startActivity(settingsIntent)
-                            } catch (e: Exception) {
-                                // Fallback to general app settings
-                                try {
-                                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                        data = android.net.Uri.parse("package:$packageName")
-                                    }
-                                    startActivity(intent)
-                                } catch (e2: Exception) {
-                                    Log.e(TAG, "Failed to open settings", e2)
-                                }
-                            }
+                            openSetDefaultLauncherFlow()
                         }
                         .setNegativeButton("Later", null)
                         .setCancelable(false)
@@ -743,26 +787,59 @@ class LauncherActivity : AppCompatActivity() {
     }
     
     private fun isDefaultLauncher(): Boolean {
-        return try {
-            val intent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_HOME)
-            }
-            
-            // Resolve the HOME intent to see which launcher is currently default
-            val resolveInfo = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
-            
-            if (resolveInfo != null) {
-                val defaultPackage = resolveInfo.activityInfo.packageName
-                val isDefault = defaultPackage == packageName
-                Log.d(TAG, "Default launcher check: current=$defaultPackage, ourPackage=$packageName, isDefault=$isDefault")
-                return isDefault
-            }
-            
-            false
-        } catch (e: Exception) {
-            Log.e(TAG, "Error checking default launcher: ${e.message}", e)
-            false
+        return ServiceHealthMonitor.isDefaultLauncher(this)
+    }
+
+    /**
+     * Opens the system UI to set BaerenLock as the default home app.
+     * Do NOT use [Intent.createChooser] with ACTION_MAIN/HOME — that only launches once,
+     * it does not change the default launcher.
+     */
+    private fun openSetDefaultLauncherFlow() {
+        Log.d(TAG, "openSetDefaultLauncherFlow: opening default-home UI")
+        if (isDefaultLauncher()) {
+            Toast.makeText(this, "BaerenLock is already the default launcher", Toast.LENGTH_SHORT).show()
+            updateHealthBanner()
+            return
         }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val roleManager = getSystemService(RoleManager::class.java)
+            if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_HOME)) {
+                try {
+                    val roleIntent = roleManager.createRequestRoleIntent(RoleManager.ROLE_HOME)
+                    if (roleIntent != null) {
+                        startActivity(roleIntent)
+                        return
+                    }
+                    Log.w(TAG, "createRequestRoleIntent(ROLE_HOME) returned null")
+                } catch (e: Exception) {
+                    Log.w(TAG, "RoleManager HOME request failed: ${e.message}", e)
+                }
+            }
+        }
+
+        val fallbacks = listOf(
+            Intent(Settings.ACTION_HOME_SETTINGS),
+            Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
+        )
+        for (fallback in fallbacks) {
+            if (fallback.resolveActivity(packageManager) != null) {
+                try {
+                    startActivity(fallback)
+                    return
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to start ${fallback.action}: ${e.message}", e)
+                }
+            }
+        }
+
+        Log.e(TAG, "No activity found for default launcher settings")
+        Toast.makeText(
+            this,
+            "Open Settings → Apps → Default apps → Home app, then choose BaerenLock",
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     private fun getVersionLabel(): String {
@@ -1243,8 +1320,7 @@ class LauncherActivity : AppCompatActivity() {
                             for (attempt in 0 until 8) {
                                 val state = SupabaseInterface.fetchRewardTimeState(this@LauncherActivity)
                                 if (state != null) {
-                                    RewardManager.currentRewardMinutes = state.bankedMins
-                                    RewardStorage.setRewardTimeExpiry(state.rewardTimeExpiry)
+                                    RewardManager.applyCloudRewardTimeState(state)
                                     if (state.bankedMins >= previousBanked + minutes) {
                                         break
                                     }
@@ -1462,16 +1538,11 @@ class LauncherActivity : AppCompatActivity() {
             }
             healthResult.defaultLauncherStatus != ServiceHealthMonitor.HealthStatus.HEALTHY -> {
                 issue = "Set BaerenLock as Default Launcher"
-                intent = Intent(Intent.ACTION_MAIN).apply {
-                    addCategory(Intent.CATEGORY_HOME)
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-                // For launcher, we'll use a chooser
+                banner.text = "⚠️ $issue (tap to open settings)"
                 banner.setOnClickListener {
-                    val chooser = Intent.createChooser(intent, "Select Home App")
-                    startActivity(chooser)
+                    Log.d(TAG, "Health banner clicked: default launcher")
+                    openSetDefaultLauncherFlow()
                 }
-                banner.text = "⚠️ $issue"
                 banner.visibility = View.VISIBLE
                 return
             }
@@ -1483,9 +1554,19 @@ class LauncherActivity : AppCompatActivity() {
             }
         }
         
-        banner.text = "⚠️ $issue"
+        banner.text = "⚠️ $issue (tap to open settings)"
         banner.setOnClickListener {
-            startActivity(intent)
+            Log.d(TAG, "Health banner clicked: $issue")
+            try {
+                if (intent.resolveActivity(packageManager) != null) {
+                    startActivity(intent)
+                } else {
+                    Toast.makeText(this, "Could not open settings for: $issue", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Health banner intent failed: ${intent.action}", e)
+                Toast.makeText(this, "Could not open settings: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
         banner.visibility = View.VISIBLE
     }
