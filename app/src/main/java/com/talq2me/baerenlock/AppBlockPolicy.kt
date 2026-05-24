@@ -22,6 +22,10 @@ object AppBlockPolicy {
 
         val isRewardApp = RewardManager.rewardEligibleApps.contains(pkgName)
         if (isRewardApp) {
+            if (!RewardManager.isRewardSessionActive()) {
+                Log.d(TAG, "Blocking reward app $pkgName: no active reward session")
+                return true
+            }
             val effectiveRewardMinutes = RewardManager.getEffectiveRewardMinutes(context)
             if (effectiveRewardMinutes <= 0) {
                 Log.d(
@@ -30,6 +34,8 @@ object AppBlockPolicy {
                 )
                 return true
             }
+            // Active reward session: allow even if the app is also on the blacklist (e.g. Chrome).
+            return false
         }
 
         val blacklist = BlacklistManager.getBlacklist(context)

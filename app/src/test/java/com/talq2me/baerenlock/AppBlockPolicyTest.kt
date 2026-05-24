@@ -54,6 +54,22 @@ class AppBlockPolicyTest {
     }
 
     @Test
+    fun shouldAllowRewardAppOnBlacklistDuringActiveSession() {
+        val pkg = "com.android.chrome"
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet("reward_apps", setOf(pkg))
+            .apply()
+        BlacklistManager.addToBlacklist(context, pkg)
+        RewardManager.refreshRewardEligibleApps(context)
+        RewardStorage.setRewardTimeExpiry("2099-01-01 12:00:00.000")
+        RewardStorage.setServerSessionMinsRemaining(10)
+        assertFalse(
+            AppBlockPolicy.shouldBlock(context, pkg, ownPackage, false, false)
+        )
+    }
+
+    @Test
     fun shouldBlockRewardAppWithNoActiveSession() {
         val pkg = "com.reward.app"
         context.getSharedPreferences("settings", Context.MODE_PRIVATE)

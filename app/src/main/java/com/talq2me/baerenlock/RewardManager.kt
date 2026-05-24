@@ -584,16 +584,24 @@ object RewardManager {
      */
     private fun returnToLauncher(context: Context) {
         try {
-            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_HOME)
+            val launcherIntent = Intent(context, LauncherActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
             }
-            context.startActivity(homeIntent)
-            Log.d(TAG, "Launched HOME intent to return to BaerenLock launcher")
+            context.startActivity(launcherIntent)
+            Log.d(TAG, "Returned to LauncherActivity (no CLEAR_TASK)")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to return to launcher: ${e.message}", e)
+            try {
+                val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_HOME)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(homeIntent)
+            } catch (e2: Exception) {
+                Log.e(TAG, "HOME fallback failed: ${e2.message}", e2)
+            }
         }
     }
     
@@ -858,30 +866,7 @@ object RewardManager {
                         // Force return to BaerenLock launcher FIRST (moves reward apps to background)
                         try {
                             // First, try to go home using the HOME intent (most reliable)
-                            val homeIntent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
-                                addCategory(android.content.Intent.CATEGORY_HOME)
-                                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or 
-                                        android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK or
-                                        android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
-                            }
-                            context.startActivity(homeIntent)
-                            Log.d(TAG, "Launched HOME intent to return to BaerenLock launcher")
-                            
-                            // Also try to start our launcher directly as backup (after a short delay)
-                            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                                try {
-                                    val launcherIntent = android.content.Intent(context, com.talq2me.baerenlock.LauncherActivity::class.java).apply {
-                                        flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
-                                                android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK or
-                                                android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                                                android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
-                                    }
-                                    context.startActivity(launcherIntent)
-                                    Log.d(TAG, "Launched LauncherActivity directly as backup")
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Failed to start launcher directly: ${e.message}", e)
-                                }
-                            }, 200) // 200ms delay to let HOME intent process first
+                            returnToLauncher(context)
                             
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed to return to launcher after reward expiration: ${e.message}", e)

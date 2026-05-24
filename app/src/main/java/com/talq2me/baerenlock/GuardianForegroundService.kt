@@ -19,6 +19,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -84,6 +85,8 @@ class GuardianForegroundService : Service() {
     private var foregroundStarted = false
     private var accessibilityStaleNotified = false
     private var pendingAudioMonitorStart: Runnable? = null
+    private var lastEnforcedBlockPkg: String? = null
+    private var lastEnforcedBlockAtMs: Long = 0L
 
     private val usageCheck = object : Runnable {
         override fun run() {
@@ -291,23 +294,34 @@ class GuardianForegroundService : Service() {
     }
 
     private fun evaluateAndEnforce(pkg: String, sourceLabel: String) {
+        val normalizedPkg = normalizePackageName(pkg)
         if (AppBlockPolicy.shouldBlock(
                 this,
-                pkg,
+                normalizedPkg,
                 packageName,
                 chromeJeLisActive,
                 chromeLaunchedFromBaerenEd
             )
         ) {
-            Log.d(TAG, "BLOCKING $pkg (source=$sourceLabel)")
+            val now = SystemClock.elapsedRealtime()
+            if (normalizedPkg == lastEnforcedBlockPkg && now - lastEnforcedBlockAtMs < BLOCK_ENFORCE_COOLDOWN_MS) {
+                return
+            }
+            lastEnforcedBlockPkg = normalizedPkg
+            lastEnforcedBlockAtMs = now
+            Log.d(TAG, "BLOCKING $normalizedPkg (source=$sourceLabel)")
             Handler(Looper.getMainLooper()).post {
-                Toast.makeText(this, "Blocked: $pkg", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Blocked: $normalizedPkg", Toast.LENGTH_SHORT).show()
             }
             if (devicePolicyManager.isDeviceOwnerActive()) {
-                devicePolicyManager.disableApp(pkg)
+                devicePolicyManager.disableApp(normalizedPkg)
             }
             returnToLauncher()
         }
+    }
+
+    private fun normalizePackageName(pkgOrProcess: String): String {
+        return pkgOrProcess.substringBefore(':')
     }
 
     private fun pollUsageStats() {
@@ -324,7 +338,7 @@ class GuardianForegroundService : Service() {
                     lastForeground = event.packageName
                 }
             }
-            val pkg = lastForeground ?: lastPackage ?: return
+            val pkg = normalizePackageName(lastForeground ?: lastPackage ?: return)
             reportForegroundApp(pkg, GuardianContract.ForegroundSource.USAGE_STATS)
         } catch (e: Exception) {
             Log.e(TAG, "pollUsageStats error", e)
@@ -338,7 +352,7 @@ class GuardianForegroundService : Service() {
             for (process in processes) {
                 if (process.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
                     reportForegroundApp(
-                        process.processName,
+                        normalizePackageName(process.processName),
                         GuardianContract.ForegroundSource.ACTIVITY_MANAGER
                     )
                     return
@@ -439,11 +453,13 @@ class GuardianForegroundService : Service() {
             val ok = SupabaseInterface.pauseRewardTime(this@GuardianForegroundService)
             if (ok) {
                 RewardManager.applyPauseRewardFromRpcSuccess(this@GuardianForegroundService, localRemaining)
-                Toast.makeText(
-                    this@GuardianForegroundService,
-                    "Reward paused: loud noise detected",
-                    Toast.LENGTH_LONG
-                ).show()
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        this@GuardianForegroundService,
+                        "Reward paused: loud noise detected",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             }
             syncAudioMonitorState()
             updateNotification()
@@ -523,30 +539,25 @@ class GuardianForegroundService : Service() {
 
     private fun returnToLauncher() {
         try {
-            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_HOME)
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_CLEAR_TASK or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+            val launcherIntent = Intent(this, LauncherActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                )
             }
-            startActivity(homeIntent)
-            Handler(Looper.getMainLooper()).postDelayed({
-                try {
-                    val launcherIntent = Intent(this, LauncherActivity::class.java).apply {
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK or
-                                Intent.FLAG_ACTIVITY_CLEAR_TASK or
-                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                                Intent.FLAG_ACTIVITY_SINGLE_TOP
-                        )
-                    }
-                    startActivity(launcherIntent)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to start launcher: ${e.message}", e)
-                }
-            }, 100)
+            startActivity(launcherIntent)
         } catch (e: Exception) {
             Log.e(TAG, "returnToLauncher failed: ${e.message}", e)
+            try {
+                val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_HOME)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                startActivity(homeIntent)
+            } catch (e2: Exception) {
+                Log.e(TAG, "HOME fallback failed: ${e2.message}", e2)
+            }
         }
     }
 
@@ -625,6 +636,7 @@ class GuardianForegroundService : Service() {
         private const val HEARTBEAT_STALE_MS = 15_000L
         private const val SETTINGS_ACTIVE_MS = 60_000L
         private const val SETTINGS_IDLE_MS = 5 * 60_000L
+        private const val BLOCK_ENFORCE_COOLDOWN_MS = 2_500L
 
         @Volatile
         var instance: GuardianForegroundService? = null

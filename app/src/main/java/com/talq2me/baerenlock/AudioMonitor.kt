@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
@@ -172,6 +173,9 @@ class AudioMonitor(
      * If we recently had real signal and then get full buffers of zeros, treat that as loud.
      */
     private fun detectOverloadMute(metrics: SampleMetrics, nowMs: Long): Boolean {
+        if (!isLikelyEmulator()) {
+            return false
+        }
         val rawLevel = max(metrics.peakPercent, metrics.rmsPercent)
         if (metrics.peakRaw >= STRONG_PEAK_RAW || rawLevel >= STRONG_LEVEL_PERCENT) {
             hadSignalThisSession = true
@@ -376,6 +380,18 @@ class AudioMonitor(
 
     private fun shouldWarnNow(lastWarnMs: Long): Boolean {
         return SystemClock.elapsedRealtime() - lastWarnMs >= WARN_THROTTLE_MS
+    }
+
+    private fun isLikelyEmulator(): Boolean {
+        val fingerprint = Build.FINGERPRINT.lowercase()
+        val model = Build.MODEL.lowercase()
+        val hardware = Build.HARDWARE.lowercase()
+        return fingerprint.contains("generic") ||
+            fingerprint.contains("emulator") ||
+            model.contains("emulator") ||
+            model.contains("sdk_gphone") ||
+            hardware.contains("goldfish") ||
+            hardware.contains("ranchu")
     }
 
     companion object {
