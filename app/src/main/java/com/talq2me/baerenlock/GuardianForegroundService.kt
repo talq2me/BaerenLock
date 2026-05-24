@@ -465,12 +465,14 @@ class GuardianForegroundService : Service() {
             val ok = SupabaseInterface.pauseRewardTime(this@GuardianForegroundService)
             if (ok) {
                 RewardManager.applyPauseRewardFromRpcSuccess(this@GuardianForegroundService, localRemaining)
+                RewardManager.refreshRewardEligibleApps(this@GuardianForegroundService)
                 withContext(Dispatchers.Main) {
                     Toast.makeText(
                         this@GuardianForegroundService,
                         "Reward paused: loud noise detected",
                         Toast.LENGTH_LONG
                     ).show()
+                    returnToLauncher()
                 }
             }
             syncAudioMonitorState()

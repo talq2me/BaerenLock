@@ -123,11 +123,13 @@ class AudioMonitor(
                 )
                 if (!inGracePeriod) {
                     updateLoudnessState(now, effectiveLevel)
-                    if (loudDurationMs(now) >= SUSTAINED_LOUD_MS) {
+                    val loudMs = loudDurationMs(now)
+                    // Must be loud right now, not only "was loud" during hysteresis tail.
+                    if (loudMs >= SUSTAINED_LOUD_MS && effectiveLevel >= thresholdPercent) {
                         Log.w(
                             tag,
                             "Sustained loudness (level=$effectiveLevel% peakRaw=${metrics.peakRaw} " +
-                                ">= threshold=$thresholdPercent%), triggering pause"
+                                "loudMs=$loudMs >= threshold=$thresholdPercent%), triggering pause"
                         )
                         loudSinceMs = 0L
                         quietSinceMs = 0L
