@@ -165,6 +165,15 @@ class GuardianForegroundService : Service() {
         }
     }
 
+    private val appUpdateCheck = object : Runnable {
+        override fun run() {
+            serviceScope.launch {
+                AppUpdateManager.checkAndApplyUpdates(this@GuardianForegroundService)
+            }
+            backgroundHandler.postDelayed(this, APP_UPDATE_CHECK_MS)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -207,6 +216,7 @@ class GuardianForegroundService : Service() {
         backgroundHandler.removeCallbacks(heartbeatWatchdog)
         backgroundHandler.removeCallbacks(settingsRefresh)
         backgroundHandler.removeCallbacks(audioSessionCheck)
+        backgroundHandler.removeCallbacks(appUpdateCheck)
         pendingAudioMonitorStart?.let { backgroundHandler.removeCallbacks(it) }
         pendingAudioMonitorStart = null
         audioMonitor?.stop()
@@ -285,6 +295,7 @@ class GuardianForegroundService : Service() {
         backgroundHandler.post(heartbeatWatchdog)
         backgroundHandler.post(settingsRefresh)
         backgroundHandler.post(audioSessionCheck)
+        backgroundHandler.postDelayed(appUpdateCheck, APP_UPDATE_INITIAL_DELAY_MS)
     }
 
     fun reportForegroundApp(pkg: String, source: GuardianContract.ForegroundSource) {
@@ -652,6 +663,8 @@ class GuardianForegroundService : Service() {
         private const val SETTINGS_ACTIVE_MS = 60_000L
         private const val SETTINGS_IDLE_MS = 5 * 60_000L
         private const val BLOCK_ENFORCE_COOLDOWN_MS = 2_500L
+        private const val APP_UPDATE_INITIAL_DELAY_MS = 60_000L
+        private const val APP_UPDATE_CHECK_MS = 24 * 60 * 60_000L
 
         @Volatile
         var instance: GuardianForegroundService? = null
