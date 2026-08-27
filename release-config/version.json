@@ -1,5 +1,5 @@
 {
-    "latestVersionCode": 65,
-    "apkUrl": "https://github.com/talq2me/BaerenLock/app/release/app-release.apk"
+    "package": "com.talq2me.baerenlock",
+    "latestVersionCode": 74,
+    "apkUrl": "https://github.com/talq2me/BaerenLock/releases/download/v74/app-release.apk"
 }
-
